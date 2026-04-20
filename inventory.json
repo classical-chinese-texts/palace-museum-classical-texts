@@ -1,0 +1,303 @@
+{
+  "description": "故宮珍本叢刊占卜命理類古籍 — 處理進度追蹤",
+  "format": "Mandoku/Kanripo 風格標記",
+  "license": "CC BY-SA 4.0",
+  "updated": "2026-04-20",
+  "status_legend": {
+    "integrated": "OCR + 校對 + 已整合進知識庫 JSON",
+    "ocr_done": "OCR 完成，待校對",
+    "ocr_in_progress": "OCR 處理中",
+    "pending": "尚未處理",
+    "skip": "非占卜命理相關，跳過"
+  },
+  "books": [
+    {
+      "code": "GGZBCK415",
+      "volume": 415,
+      "title": "梅花易數、六爻一撮金、靈棋經、大六壬神課金口訣、邵子易數、大六壬課經集",
+      "sub_books": ["梅花易數", "靈棋經", "大六壬神課金口訣", "邵子易數", "大六壬課經集"],
+      "pages": 502,
+      "status": "integrated",
+      "category": ["卜筮", "六壬", "易數"],
+      "notes": "v1 OCR 已整合進 palace_museum_classical.json，待 Mandoku 格式重做"
+    },
+    {
+      "code": "GGZBCK422",
+      "volume": 422,
+      "title": "淵海子平、神相全編、子平集要",
+      "sub_books": ["淵海子平", "神相全編", "子平集要"],
+      "pages": 374,
+      "status": "integrated",
+      "category": ["命理", "相術"],
+      "notes": "v1 OCR 已整合進 palace_museum_classical.json，待 Mandoku 格式重做"
+    },
+    {
+      "code": "GGZBCK423",
+      "volume": 423,
+      "title": "御定五星精義、星平集腋統宗、神相彙編、子平管見集解",
+      "sub_books": ["御定五星精義", "星平集腋統宗", "神相彙編", "子平管見集解"],
+      "pages": 462,
+      "status": "integrated",
+      "category": ["星命", "命理", "相術"],
+      "notes": "v1 OCR 已整合進 palace_museum_classical.json，待 Mandoku 格式重做"
+    },
+    {
+      "code": "GGZBCK421",
+      "volume": 421,
+      "title": "六壬眎斯、鼎鍥卜筮鬼谷源流斷易天機大全、火珠林、奇門卜筮、四季開門",
+      "sub_books": ["六壬眎斯", "鼎鍥卜筮鬼谷源流斷易天機大全", "火珠林", "奇門卜筮", "四季開門"],
+      "pages": null,
+      "status": "pending",
+      "category": ["六壬", "卜筮", "奇門"]
+    },
+    {
+      "code": "GGZBCK001",
+      "volume": 1,
+      "title": "新刻官板周易本義、周易去疑",
+      "sub_books": ["新刻官板周易本義", "周易去疑"],
+      "pages": null,
+      "status": "pending",
+      "category": ["易經"]
+    },
+    {
+      "code": "GGZBCK002",
+      "volume": 2,
+      "title": "講易手錄、桂林點易丹",
+      "sub_books": ["講易手錄", "桂林點易丹"],
+      "pages": null,
+      "status": "pending",
+      "category": ["易經"]
+    },
+    {
+      "code": "GGZBCK003",
+      "volume": 3,
+      "title": "周易疏義、四聖一心錄、周易淸言",
+      "sub_books": ["周易疏義", "四聖一心錄", "周易淸言"],
+      "pages": null,
+      "status": "pending",
+      "category": ["易經"]
+    },
+    {
+      "code": "GGZBCK004",
+      "volume": 4,
+      "title": "周易淸言、周易義例、易圖解、易玩",
+      "sub_books": ["周易淸言", "周易義例", "易圖解", "易玩"],
+      "pages": null,
+      "status": "pending",
+      "category": ["易經"]
+    },
+    {
+      "code": "GGZBCK005",
+      "volume": 5,
+      "title": "御纂周易折中",
+      "sub_books": ["御纂周易折中"],
+      "pages": null,
+      "status": "pending",
+      "category": ["易經"]
+    },
+    {
+      "code": "GGZBCK006",
+      "volume": 6,
+      "title": "日講易經解義",
+      "sub_books": ["日講易經解義"],
+      "pages": null,
+      "status": "pending",
+      "category": ["易經"]
+    },
+    {
+      "code": "GGZBCK405",
+      "volume": 405,
+      "title": "河洛理數、範衍、廣象徹微初集",
+      "sub_books": ["河洛理數", "範衍", "廣象徹微初集"],
+      "pages": null,
+      "status": "pending",
+      "category": ["河洛", "象數"]
+    },
+    {
+      "code": "GGZBCK409",
+      "volume": 409,
+      "title": "水龍經、地理四彈子、雪心賦直解、金精廖公祕授地學心法正傳畫筴扒砂經",
+      "sub_books": ["水龍經", "地理四彈子", "雪心賦直解", "金精廖公祕授地學心法正傳畫筴扒砂經"],
+      "pages": null,
+      "status": "pending",
+      "category": ["風水", "地理"]
+    },
+    {
+      "code": "GGZBCK410",
+      "volume": 410,
+      "title": "入地眼全書、石函平砂玉尺經、郭璞葬經、魯班經匠家鏡、選擇紀全、靈驅解法",
+      "sub_books": ["入地眼全書", "石函平砂玉尺經", "郭璞葬經", "魯班經匠家鏡", "選擇紀全", "靈驅解法"],
+      "pages": null,
+      "status": "pending",
+      "category": ["風水", "地理", "擇日"]
+    },
+    {
+      "code": "GGZBCK411",
+      "volume": 411,
+      "title": "重刊人子須知資孝地理心學統宗",
+      "sub_books": ["重刊人子須知資孝地理心學統宗"],
+      "pages": null,
+      "status": "pending",
+      "category": ["風水", "地理"]
+    },
+    {
+      "code": "GGZBCK412",
+      "volume": 412,
+      "title": "地理參贊玄機僊婆集、地理琢玉斧巒頭歌括",
+      "sub_books": ["地理參贊玄機僊婆集", "地理琢玉斧巒頭歌括"],
+      "pages": null,
+      "status": "pending",
+      "category": ["風水", "地理"]
+    },
+    {
+      "code": "GGZBCK413",
+      "volume": 413,
+      "title": "地理正宗臆解、地理黑囊經、青囊心印、地學",
+      "sub_books": ["地理正宗臆解", "地理黑囊經", "青囊心印", "地學"],
+      "pages": null,
+      "status": "pending",
+      "category": ["風水", "地理"]
+    },
+    {
+      "code": "GGZBCK416",
+      "volume": 416,
+      "title": "增刪卜易、卜筮正宗",
+      "sub_books": ["增刪卜易", "卜筮正宗"],
+      "pages": null,
+      "status": "pending",
+      "category": ["卜筮", "六爻"]
+    },
+    {
+      "code": "GGZBCK417",
+      "volume": 417,
+      "title": "御定六壬直指",
+      "sub_books": ["御定六壬直指"],
+      "pages": null,
+      "status": "pending",
+      "category": ["六壬"]
+    },
+    {
+      "code": "GGZBCK418",
+      "volume": 418,
+      "title": "御定六壬直指、御定六壬金口合占",
+      "sub_books": ["御定六壬直指", "御定六壬金口合占"],
+      "pages": null,
+      "status": "pending",
+      "category": ["六壬"]
+    },
+    {
+      "code": "GGZBCK419",
+      "volume": 419,
+      "title": "御定卜筮精蘊、六壬經緯、六壬粹言、六壬類聚",
+      "sub_books": ["御定卜筮精蘊", "六壬經緯", "六壬粹言", "六壬類聚"],
+      "pages": null,
+      "status": "pending",
+      "category": ["卜筮", "六壬"]
+    },
+    {
+      "code": "GGZBCK420",
+      "volume": 420,
+      "title": "太乙數統宗大全",
+      "sub_books": ["太乙數統宗大全"],
+      "pages": null,
+      "status": "pending",
+      "category": ["太乙"]
+    },
+    {
+      "code": "GGZBCK424",
+      "volume": 424,
+      "title": "麻衣先生人相編、神相水鏡集、太極數",
+      "sub_books": ["麻衣先生人相編", "神相水鏡集", "太極數"],
+      "pages": null,
+      "status": "pending",
+      "category": ["相術", "太極"]
+    },
+    {
+      "code": "GGZBCK425",
+      "volume": 425,
+      "title": "精考演禽三世相法",
+      "sub_books": ["精考演禽三世相法"],
+      "pages": null,
+      "status": "pending",
+      "category": ["相術", "演禽"]
+    },
+    {
+      "code": "GGZBCK426",
+      "volume": 426,
+      "title": "奇門遁甲統宗大全、大統皇曆經世",
+      "sub_books": ["奇門遁甲統宗大全", "大統皇曆經世"],
+      "pages": null,
+      "status": "pending",
+      "category": ["奇門", "曆法"]
+    },
+    {
+      "code": "GGZBCK427",
+      "volume": 427,
+      "title": "奇門遁甲金鏡寶鑑",
+      "sub_books": ["奇門遁甲金鏡寶鑑"],
+      "pages": null,
+      "status": "pending",
+      "category": ["奇門"]
+    },
+    {
+      "code": "GGZBCK428",
+      "volume": 428,
+      "title": "奇門遁甲祕笈大全、陰陽五要奇書、蕫氏諏吉新書、蕫公選要覽",
+      "sub_books": ["奇門遁甲祕笈大全", "陰陽五要奇書", "蕫氏諏吉新書", "蕫公選要覽"],
+      "pages": null,
+      "status": "pending",
+      "category": ["奇門", "擇日"]
+    },
+    {
+      "code": "GGZBCK429",
+      "volume": 429,
+      "title": "奇門遁甲、奇門遁甲全局陽遁九局陰遁九局、奇門遁甲備覽、奇門遁甲捷要",
+      "sub_books": ["奇門遁甲", "奇門遁甲全局陽遁九局陰遁九局", "奇門遁甲備覽", "奇門遁甲捷要"],
+      "pages": null,
+      "status": "pending",
+      "category": ["奇門"]
+    },
+    {
+      "code": "GGZBCK430",
+      "volume": 430,
+      "title": "御定奇門眞詮、御定奇門寶鑒",
+      "sub_books": ["御定奇門眞詮", "御定奇門寶鑒"],
+      "pages": null,
+      "status": "pending",
+      "category": ["奇門"]
+    },
+    {
+      "code": "GGZBCK431",
+      "volume": 431,
+      "title": "御定奇門寶鑒",
+      "sub_books": ["御定奇門寶鑒"],
+      "pages": null,
+      "status": "pending",
+      "category": ["奇門"]
+    },
+    {
+      "code": "GGZBCK432",
+      "volume": 432,
+      "title": "御定奇門寶鑒（續）",
+      "sub_books": ["御定奇門寶鑒（續）"],
+      "pages": null,
+      "status": "pending",
+      "category": ["奇門"]
+    },
+    {
+      "code": "GGZBCK433",
+      "volume": 433,
+      "title": "奇門陰遁九局、奇門陽遁、許眞君萬全玉匣記、欽定修造吉方立成、選擇書",
+      "sub_books": ["奇門陰遁九局", "奇門陽遁", "許眞君萬全玉匣記", "欽定修造吉方立成", "選擇書"],
+      "pages": null,
+      "status": "pending",
+      "category": ["奇門", "擇日"]
+    }
+  ],
+  "summary": {
+    "total_books": 31,
+    "integrated": 3,
+    "ocr_done": 0,
+    "pending": 28
+  }
+}
