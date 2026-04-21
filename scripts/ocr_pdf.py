@@ -5,16 +5,24 @@
 用法：
     python scripts/ocr_pdf.py --pdf /path/to/GGZBCK422.pdf --volume GGZBCK422 --book 淵海子平 --start 1 --end 200
     python scripts/ocr_pdf.py --pdf /path/to/GGZBCK422.pdf --volume GGZBCK422 --book 淵海子平 --pages 10,15,20-30
+    python scripts/ocr_pdf.py --pdf /path/to/GGZBCK422.pdf --volume GGZBCK422 --book 淵海子平 --model v5-server
 
 輸出：texts/GGZBCK422/淵海子平/raw/001.txt ~ NNN.txt（每頁一檔）
 
-依賴：PaddleOCR + pdf2image (poppler)
+依賴：paddleocr >= 3.4.0 + paddlepaddle >= 3.0.0 + pdf2image (poppler)
+
+模型選項：
+    hybrid   — PP-OCRv4 mobile 偵測 + PP-OCRv5 server 識別（預設，CPU 最佳平衡）
+    v4-mobile — PP-OCRv4 mobile（最快，品質略低）
+    v5-server — PP-OCRv5 server（最準，CPU 極慢，建議搭配 GPU）
 """
 import argparse
 import os
 import sys
 from datetime import date
 from pathlib import Path
+
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 # ── PDF → 圖片 ──────────────────────────────────────────
 try:
@@ -27,8 +35,21 @@ except ImportError:
 try:
     from paddleocr import PaddleOCR
 except ImportError:
-    print("需要安裝 PaddleOCR: pip install paddleocr")
+    print("需要安裝 PaddleOCR: pip install 'paddleocr>=3.4.0'")
     sys.exit(1)
+
+MODEL_PRESETS = {
+    "hybrid": {
+        "text_detection_model_name": "PP-OCRv4_mobile_det",
+        "text_recognition_model_name": "PP-OCRv5_server_rec",
+    },
+    "v4-mobile": {
+        "ocr_version": "PP-OCRv4",
+    },
+    "v5-server": {
+        "ocr_version": "PP-OCRv5",
+    },
+}
 
 
 def parse_page_spec(spec: str, total_pages: int) -> list[int]:
@@ -47,48 +68,75 @@ def parse_page_spec(spec: str, total_pages: int) -> list[int]:
     return sorted(set(pages))
 
 
-def ocr_image(ocr_engine, img) -> list[str]:
-    """用 PaddleOCR 辨識單張圖片，回傳按 y 座標排序的文字行。"""
+def ocr_image(ocr_engine, img, min_text_len: int = 2, min_score: float = 0.3) -> list[tuple[str, float]]:
+    """用 PaddleOCR 辨識單張圖片，回傳按 y 座標排序的文字行。
+
+    使用 paddleocr >= 3.4.0 的 predict() API。
+    過濾掉過短或低信心度的噪音（頁眉、邊注碎片等）。
+    """
     import numpy as np
+    import tempfile
 
-    img_array = np.array(img)
-    result = ocr_engine.ocr(img_array, cls=True)
+    # predict() 需要檔案路徑，將 PIL Image 暫存
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        img.save(tmp.name)
+        tmp_path = tmp.name
 
-    if not result or not result[0]:
-        return []
+    try:
+        for result in ocr_engine.predict(tmp_path):
+            texts = result.get("rec_texts", [])
+            scores = result.get("rec_scores", [])
+            polys = result.get("dt_polys", [])
 
-    # 按 y 座標排序（上到下），同行按 x 排序（左到右）
-    lines_with_pos = []
-    for line_info in result[0]:
-        box = line_info[0]
-        text = line_info[1][0]
-        confidence = line_info[1][1]
-        y_center = (box[0][1] + box[2][1]) / 2
-        x_center = (box[0][0] + box[2][0]) / 2
-        lines_with_pos.append((y_center, x_center, text, confidence))
+            if not texts:
+                return []
 
-    # 分組：y 座標差 < 20 pixel 視為同一行
-    lines_with_pos.sort(key=lambda t: (t[0], t[1]))
-    grouped_lines = []
-    current_group = [lines_with_pos[0]]
+            # 建立 (y_center, x_center, text, confidence) 列表
+            lines_with_pos = []
+            for text, score, poly in zip(texts, scores, polys):
+                poly = np.array(poly)
+                y_center = (poly[0][1] + poly[2][1]) / 2
+                x_center = (poly[0][0] + poly[2][0]) / 2
+                # 過濾噪音：太短、低信心度、或空白
+                if len(text.strip()) < min_text_len and score < 0.9:
+                    continue
+                if score < min_score:
+                    continue
+                lines_with_pos.append((y_center, x_center, text, score))
 
-    for item in lines_with_pos[1:]:
-        if abs(item[0] - current_group[-1][0]) < 20:
-            current_group.append(item)
-        else:
-            current_group.sort(key=lambda t: t[1])
-            merged = "".join(t[2] for t in current_group)
-            avg_conf = sum(t[3] for t in current_group) / len(current_group)
-            grouped_lines.append((merged, avg_conf))
-            current_group = [item]
+            if not lines_with_pos:
+                return []
 
-    if current_group:
-        current_group.sort(key=lambda t: t[1])
-        merged = "".join(t[2] for t in current_group)
-        avg_conf = sum(t[3] for t in current_group) / len(current_group)
-        grouped_lines.append((merged, avg_conf))
+            # 古籍直排文字：按 x 座標從右到左排序（閱讀順序）
+            # 同一 x 帶（差 < 40px）的文字合併，合併後按 y 排序
+            lines_with_pos.sort(key=lambda t: -t[1])  # x 降序（右到左）
+            grouped_lines = []
+            current_group = [lines_with_pos[0]]
 
-    return grouped_lines
+            for item in lines_with_pos[1:]:
+                # 比較與群組「錨點」的 x 差距（避免鏈式合併）
+                anchor_x = current_group[0][1]
+                if abs(item[1] - anchor_x) < 40:
+                    current_group.append(item)
+                else:
+                    # 同欄內按 y 排序（上到下）
+                    current_group.sort(key=lambda t: t[0])
+                    merged = "".join(t[2] for t in current_group)
+                    avg_conf = sum(t[3] for t in current_group) / len(current_group)
+                    grouped_lines.append((merged, avg_conf))
+                    current_group = [item]
+
+            if current_group:
+                current_group.sort(key=lambda t: t[0])
+                merged = "".join(t[2] for t in current_group)
+                avg_conf = sum(t[3] for t in current_group) / len(current_group)
+                grouped_lines.append((merged, avg_conf))
+
+            return grouped_lines
+    finally:
+        os.unlink(tmp_path)
+
+    return []
 
 
 def format_mandoku_page(
@@ -96,6 +144,7 @@ def format_mandoku_page(
     title: str,
     source: str,
     page_num: int,
+    model_name: str = "hybrid",
     low_conf_threshold: float = 0.7,
 ) -> str:
     """將 OCR 結果格式化為 Mandoku 風格 txt。"""
@@ -104,7 +153,7 @@ def format_mandoku_page(
         f"#+SOURCE: {source}\n"
         f"#+DATE: {date.today().isoformat()}\n"
         f"#+PAGE: {page_num}\n"
-        f"#+OCR: PaddleOCR\n"
+        f"#+OCR: PaddleOCR-{model_name}\n"
         "\n"
     )
 
@@ -137,6 +186,13 @@ def main():
     parser.add_argument("--pages", type=str, default=None, help="指定頁碼，如 '1-10,15,20-30'")
     parser.add_argument("--dpi", type=int, default=300, help="PDF 轉圖片解析度（預設 300）")
     parser.add_argument(
+        "--model",
+        type=str,
+        default="hybrid",
+        choices=list(MODEL_PRESETS.keys()),
+        help="OCR 模型組合（預設 hybrid = v4偵測+v5識別，CPU最佳平衡）",
+    )
+    parser.add_argument(
         "--repo-root",
         type=str,
         default=None,
@@ -156,8 +212,18 @@ def main():
     source = f"故宮珍本叢刊第{args.volume.replace('GGZBCK', '')}冊"
 
     # 初始化 OCR
-    print(f"初始化 PaddleOCR...")
-    ocr = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+    preset = MODEL_PRESETS[args.model]
+    print(f"初始化 PaddleOCR（模型: {args.model}）...")
+    # hybrid 模式直接指定模型名稱，不需要 lang 參數
+    ocr_kwargs = {
+        "use_doc_orientation_classify": False,
+        "use_doc_unwarping": False,
+        "use_textline_orientation": False,
+        **preset,
+    }
+    if "ocr_version" in preset:
+        ocr_kwargs["lang"] = "ch"
+    ocr = PaddleOCR(**ocr_kwargs)
 
     # 轉換 PDF
     print(f"讀取 PDF: {args.pdf}")
@@ -215,14 +281,14 @@ def main():
                     f"#+TITLE: {args.book}\n"
                     f"#+SOURCE: {source}\n"
                     f"#+PAGE: {page_num}\n"
-                    f"#+OCR: PaddleOCR\n"
+                    f"#+OCR: PaddleOCR-{args.model}\n"
                     f"\n"
                     f"\t[此頁無可辨識文字，可能為圖版或空白頁]\n"
                 )
             continue
 
         # 格式化輸出
-        content = format_mandoku_page(lines, args.book, source, page_num)
+        content = format_mandoku_page(lines, args.book, source, page_num, args.model)
 
         with open(out_file, "w", encoding="utf-8") as f:
             f.write(content)
