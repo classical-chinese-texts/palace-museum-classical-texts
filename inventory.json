@@ -163,9 +163,11 @@
       "volume": 416,
       "title": "增刪卜易、卜筮正宗",
       "sub_books": ["增刪卜易", "卜筮正宗"],
-      "pages": null,
-      "status": "pending",
-      "category": ["卜筮", "六爻"]
+      "pages": 414,
+      "page_split": {"增刪卜易": "1-236", "卜筮正宗": "237-414"},
+      "status": "ocr_in_progress",
+      "category": ["卜筮", "六爻"],
+      "notes": "Gemini Vision OCR 進行中，19/414 頁完成。pipeline 已驗證（OCR→JSON→知識庫→檢索）。免費版 20 RPD 限制，需分多日完成"
     },
     {
       "code": "GGZBCK417",
@@ -297,7 +299,8 @@
   "summary": {
     "total_books": 31,
     "integrated": 3,
+    "ocr_in_progress": 1,
     "ocr_done": 0,
-    "pending": 28
+    "pending": 27
   }
 }
