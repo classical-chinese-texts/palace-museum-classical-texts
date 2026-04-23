@@ -1,0 +1,7 @@
+#+TITLE: 增刪卜易
+#+SOURCE: 故宮珍本叢刊第416冊
+#+DATE: 2026-04-21
+#+PAGE: 9
+#+OCR: Gemini-Vision
+
+	[OCR 失敗: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'This model is currently experiencing high demand. Spikes in demand are usually temporary. Please try again later.', 'status': 'UNAVAILABLE'}}]

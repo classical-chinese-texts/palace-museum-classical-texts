@@ -2,7 +2,7 @@
   "description": "故宮珍本叢刊占卜命理類古籍 — 處理進度追蹤",
   "format": "Mandoku/Kanripo 風格標記",
   "license": "CC BY-SA 4.0",
-  "updated": "2026-04-20",
+  "updated": "2026-04-21",
   "status_legend": {
     "integrated": "OCR + 校對 + 已整合進知識庫 JSON",
     "ocr_done": "OCR 完成，待校對",
@@ -165,9 +165,9 @@
       "sub_books": ["增刪卜易", "卜筮正宗"],
       "pages": 414,
       "page_split": {"增刪卜易": "1-236", "卜筮正宗": "237-414"},
-      "status": "ocr_in_progress",
+      "status": "integrated",
       "category": ["卜筮", "六爻"],
-      "notes": "Gemini Vision OCR 進行中，19/414 頁完成。pipeline 已驗證（OCR→JSON→知識庫→檢索）。免費版 20 RPD 限制，需分多日完成"
+      "notes": "Gemini 2.5 Flash Lite OCR 完成（414/414 頁，0 失敗）。已整合進 palace_museum_classical.json（150 萬字，387 章）並由 divination_knowledge.py 載入"
     },
     {
       "code": "GGZBCK417",
@@ -298,8 +298,8 @@
   ],
   "summary": {
     "total_books": 31,
-    "integrated": 3,
-    "ocr_in_progress": 1,
+    "integrated": 4,
+    "ocr_in_progress": 0,
     "ocr_done": 0,
     "pending": 27
   }
