@@ -12,7 +12,7 @@ router = APIRouter(tags=["ocr"])
 
 
 class OCRRequest(BaseModel):
-    engines: list[str] = ["paddle"]  # "paddle", "kraken", or both
+    engines: list[str] = ["paddle"]  # "paddle", "kraken", "deskew", or combinations
 
 
 @router.post("/api/pages/{page_id}/ocr")

@@ -1,5 +1,6 @@
 """OCR orchestration — dual engine dispatch + result merging."""
 import asyncio
+import logging
 import sys
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from ..config import CONFIDENCE_THRESHOLD, PIPELINE_DIR
 from ..models import Page, Character, CorrectionLog
 from .char_detection import DetectedChar, detect_characters_paddle
 from .kraken_service import run_kraken_ocr
+
+logger = logging.getLogger(__name__)
 
 # Import pipeline merge utilities
 if str(PIPELINE_DIR.parent) not in sys.path:
@@ -27,19 +30,28 @@ async def run_ocr_pipeline(page_id: int, engines: list[str], db: AsyncSession):
     results: dict[str, list[DetectedChar]] = {}
 
     # Run engines (in thread pool for CPU-bound work)
+    if "deskew" in engines:
+        try:
+            deskew_chars = await asyncio.to_thread(
+                _run_deskew_pipeline, image_path,
+            )
+            results["deskew"] = deskew_chars
+        except Exception as e:
+            logger.error("Deskew pipeline failed for page %d: %s", page_id, e)
+
     if "paddle" in engines:
         try:
             paddle_chars = await asyncio.to_thread(detect_characters_paddle, image_path)
             results["paddle"] = paddle_chars
         except Exception as e:
-            print(f"PaddleOCR failed for page {page_id}: {e}")
+            logger.error("PaddleOCR failed for page %d: %s", page_id, e)
 
     if "kraken" in engines:
         try:
             kraken_chars = await asyncio.to_thread(run_kraken_ocr, image_path)
             results["kraken"] = kraken_chars
         except Exception as e:
-            print(f"Kraken failed for page {page_id}: {e}")
+            logger.error("Kraken failed for page %d: %s", page_id, e)
 
     if not results:
         page.ocr_status = "failed"
@@ -315,3 +327,231 @@ async def _template_identify_gap_fills(
             identified += 1
 
     return identified
+
+
+def _run_deskew_pipeline(image_path: str) -> list[DetectedChar]:
+    """Deskew + column-grid detection + PaddleOCR recognition.
+
+    For scanned book pages (e.g., BSB/Google-digitized) where:
+    - Kraken CHAT models fail (wrong scan format)
+    - PaddleOCR's text detection misses sparse/tabular regions
+
+    Pipeline:
+    1. Perspective-correct the page using text frame borders
+    2. Detect column strips via vertical ink projection
+    3. Split each column into character bboxes (equal-spacing + valley snap)
+    4. Run PaddleOCR on corrected image for text matching
+    5. Run rec-only on unmatched bboxes
+    6. Filter border noise
+    """
+    import os
+    import cv2
+    import numpy as np
+    from .deskew_service import deskew_page, detect_columns_and_chars
+
+    # Step 1: Deskew
+    corrected_path = image_path.rsplit(".", 1)[0] + "_corrected.png"
+    deskew_result = deskew_page(image_path, save_path=corrected_path)
+
+    if deskew_result is None:
+        # Fallback: use original image without perspective correction
+        corrected_img = cv2.imread(image_path)
+        if corrected_img is None:
+            return []
+        working_path = image_path
+    else:
+        corrected_img = deskew_result.corrected_image
+        working_path = corrected_path
+        logger.info("Deskew: skew=%.3f°, saved to %s",
+                     deskew_result.skew_angle, corrected_path)
+
+    # Step 2-3: Column detection + character splitting
+    grid_bboxes = detect_columns_and_chars(corrected_img)
+    if not grid_bboxes:
+        logger.warning("No columns/chars detected by grid")
+        return []
+
+    logger.info("Grid detected %d bboxes", len(grid_bboxes))
+
+    # Step 4: Run PaddleOCR on full corrected image for text matching
+    ocr = _get_paddle_ocr()
+    paddle_results = ocr.predict(working_path)
+    ocr_lines = []
+    if paddle_results:
+        res = paddle_results[0].json["res"]
+        for poly, text, score in zip(
+            res.get("dt_polys", []),
+            res.get("rec_texts", []),
+            res.get("rec_scores", []),
+        ):
+            if not text or not text.strip() or score < 0.3:
+                continue
+            xs = [p[0] for p in poly]
+            ys = [p[1] for p in poly]
+            ocr_lines.append({
+                "text": text,
+                "score": score,
+                "x": min(xs), "y": min(ys),
+                "w": max(xs) - min(xs), "h": max(ys) - min(ys),
+            })
+
+    # Match OCR text to grid bboxes by spatial overlap
+    chars: list[DetectedChar] = []
+    matched_bbox_indices: set[int] = set()
+
+    for line in ocr_lines:
+        line_chars = list(line["text"])
+        lx, ly, lw, lh = line["x"], line["y"], line["w"], line["h"]
+        is_vert = lh > lw * 1.2
+
+        if is_vert:
+            char_h = lh / len(line_chars) if line_chars else lh
+        else:
+            char_w = lw / len(line_chars) if line_chars else lw
+
+        for ci, ch in enumerate(line_chars):
+            if is_vert:
+                cx = lx + lw / 2
+                cy = ly + ci * char_h + char_h / 2
+            else:
+                cx = lx + ci * char_w + char_w / 2
+                cy = ly + lh / 2
+
+            # Find best matching grid bbox
+            best_idx = None
+            best_dist = float("inf")
+            for bi, gb in enumerate(grid_bboxes):
+                if bi in matched_bbox_indices:
+                    continue
+                gcx = gb["x"] + gb["w"] / 2
+                gcy = gb["y"] + gb["h"] / 2
+                dist = ((cx - gcx) ** 2 + (cy - gcy) ** 2) ** 0.5
+                if dist < best_dist and dist < max(gb["w"], gb["h"]) * 1.5:
+                    best_dist = dist
+                    best_idx = bi
+
+            if best_idx is not None:
+                matched_bbox_indices.add(best_idx)
+                gb = grid_bboxes[best_idx]
+                chars.append(DetectedChar(
+                    bbox_x=gb["x"], bbox_y=gb["y"],
+                    bbox_w=gb["w"], bbox_h=gb["h"],
+                    text=ch, confidence=line["score"],
+                    engine="grid+paddle",
+                ))
+
+    # Add unmatched bboxes
+    for bi, gb in enumerate(grid_bboxes):
+        if bi not in matched_bbox_indices:
+            chars.append(DetectedChar(
+                bbox_x=gb["x"], bbox_y=gb["y"],
+                bbox_w=gb["w"], bbox_h=gb["h"],
+                text=None, confidence=0.0,
+                engine="grid",
+            ))
+
+    # Step 5: Run rec-only on unmatched bboxes
+    _rec_fill_unmatched(chars, corrected_img)
+
+    # Step 6: Filter border noise (col 0 = leftmost, often page border)
+    _filter_border_noise(chars, corrected_img.shape[1])
+
+    # Assign reading order
+    _reassign_order(chars)
+
+    recognized = sum(1 for c in chars if c.text and not getattr(c, "_deleted", False))
+    logger.info("Deskew pipeline: %d total, %d recognized", len(chars), recognized)
+
+    # Remove deleted chars
+    chars = [c for c in chars if not getattr(c, "_deleted", False)]
+    return chars
+
+
+_paddle_ocr_instance = None
+
+
+def _get_paddle_ocr():
+    """Lazy-init PaddleOCR (hybrid: v4 det + v5 rec)."""
+    global _paddle_ocr_instance
+    if _paddle_ocr_instance is None:
+        import os
+        os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+        if str(PIPELINE_DIR.parent) not in sys.path:
+            sys.path.insert(0, str(PIPELINE_DIR.parent))
+        from pipeline.engines import init_paddle_ocr
+        _paddle_ocr_instance = init_paddle_ocr(model="hybrid")
+    return _paddle_ocr_instance
+
+
+def _rec_fill_unmatched(
+    chars: list[DetectedChar], image: "np.ndarray",
+) -> None:
+    """Run PaddleOCR rec model on individual unmatched bbox crops."""
+    import os
+    import cv2
+    import tempfile
+
+    os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+    from paddlex import create_model
+
+    unmatched = [c for c in chars if not c.text and c.bbox_w >= 15 and c.bbox_h >= 15]
+    if not unmatched:
+        return
+
+    rec = create_model("PP-OCRv5_server_rec")
+    h_img, w_img = image.shape[:2]
+
+    for c in unmatched:
+        pad = 10
+        y1 = max(0, int(c.bbox_y) - pad)
+        y2 = min(h_img, int(c.bbox_y + c.bbox_h) + pad)
+        x1 = max(0, int(c.bbox_x) - pad)
+        x2 = min(w_img, int(c.bbox_x + c.bbox_w) + pad)
+        crop = image[y1:y2, x1:x2]
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            cv2.imwrite(tmp.name, crop)
+            try:
+                for result in rec.predict(tmp.name):
+                    r = result.json["res"]
+                    text = r["rec_text"].strip()
+                    score = r["rec_score"]
+                    if text and score > 0.05:
+                        c.text = text
+                        c.confidence = score
+                        c.engine = "grid+paddle_rec"
+                    break
+            except Exception:
+                pass
+            finally:
+                os.unlink(tmp.name)
+
+
+def _filter_border_noise(
+    chars: list[DetectedChar], page_width: int,
+) -> None:
+    """Mark leftmost column as deleted if it's mostly narrow/noise bboxes.
+
+    The leftmost 'column' from grid detection is often the page border
+    line, not actual text. Detect this by checking if most bboxes in the
+    column are very narrow (< 20px wide) or have very low confidence.
+    """
+    if not chars:
+        return
+
+    # Find leftmost column by X position
+    min_x = min(c.bbox_x for c in chars)
+    col0_threshold = min_x + 30  # chars within 30px of left edge
+
+    col0 = [c for c in chars if c.bbox_x < col0_threshold]
+    if not col0:
+        return
+
+    # Check if >50% are noise (narrow or unrecognized)
+    noise_count = sum(
+        1 for c in col0 if c.bbox_w < 20 or (not c.text) or c.confidence < 0.1
+    )
+    if noise_count > len(col0) * 0.5:
+        for c in col0:
+            c._deleted = True  # type: ignore[attr-defined]
+        logger.info("Filtered %d border noise chars in leftmost column", len(col0))
