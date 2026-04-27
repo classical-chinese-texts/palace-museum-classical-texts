@@ -160,7 +160,7 @@ async def get_candidates(
         "variants": [],
     }
 
-    # Template matches (if page image exists)
+    # Visual template matches (pHash + SSIM, if page image exists)
     page = await db.get(Page, char.page_id)
     if page and page.image_path:
         from pathlib import Path as P
@@ -177,21 +177,50 @@ async def get_candidates(
                     matches = await template_service.match_templates(crop, db, top_k=top_k)
                     result["template_matches"] = matches
 
-    # Confusables + Variants from dictionaries
+    # Text-based template matches: show confirmed examples of OCR text + confusables
+    # This helps when pHash fails (e.g. different calligraphic styles)
     current_text = char.display_text
     if current_text and current_text != "□":
+        # Find templates by text (same character + confusables)
+        lookup_texts = {current_text}
         try:
             from pipeline.dictionaries import get_confusable, normalize_variant
             confusables = get_confusable(current_text)
             result["confusables"] = confusables
+            lookup_texts.update(confusables)
 
             normalized = normalize_variant(current_text)
             if normalized != current_text:
                 result["variants"] = [normalized]
-            # Also check reverse: if current text IS the standard form,
-            # show what variants map to it
+                lookup_texts.add(normalized)
         except ImportError:
             pass  # dictionaries module not available
+
+        # Add text-based templates that weren't found by visual matching
+        matched_ids = {m["template_id"] for m in result["template_matches"]}
+        text_matches = await db.execute(
+            select(CharacterTemplate).where(
+                CharacterTemplate.text.in_(lookup_texts),
+                CharacterTemplate.is_active == True,
+                CharacterTemplate.id.notin_(matched_ids) if matched_ids else True,
+            ).limit(top_k)
+        )
+        for t in text_matches.scalars():
+            if t.id not in matched_ids:
+                result["template_matches"].append({
+                    "text": t.text,
+                    "similarity": 0.0,  # Not visually compared
+                    "template_id": t.id,
+                    "image_path": t.image_path,
+                    "hamming_distance": -1,  # Text-based match indicator
+                })
+                matched_ids.add(t.id)
+    else:
+        try:
+            from pipeline.dictionaries import get_confusable, normalize_variant
+            # no-op for □ or empty
+        except ImportError:
+            pass
 
     return result
 

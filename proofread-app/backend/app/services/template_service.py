@@ -99,22 +99,41 @@ def compute_ssim(img1: np.ndarray, img2: np.ndarray) -> float:
 
 
 def _normalize_template(image: np.ndarray, size: int = TEMPLATE_SIZE) -> np.ndarray:
-    """Normalize character image to size x size grayscale, preserving aspect ratio.
+    """Normalize character image to size x size binarized, preserving aspect ratio.
 
-    Pads shorter dimension with white (255) to maintain square output.
+    1. Convert to grayscale
+    2. Otsu binarize (white ink on black bg)
+    3. Tight-crop to ink bounding box
+    4. Resize preserving aspect ratio, center on white canvas
+
+    Binarization removes background/contrast differences between pages,
+    making pHash more consistent for the same character across pages.
     """
     if len(image.shape) == 3:
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     else:
         gray = image
 
-    h, w = gray.shape
-    scale = size / max(h, w)
-    new_h, new_w = int(h * scale), int(w * scale)
-    resized = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    # Binarize: ink = 255, background = 0
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # Center on white canvas
-    canvas = np.full((size, size), 255, dtype=np.uint8)
+    # Tight crop to ink extent (remove excess background)
+    ink_points = np.where(binary > 0)
+    if len(ink_points[0]) > 0:
+        y1, y2 = ink_points[0].min(), ink_points[0].max() + 1
+        x1, x2 = ink_points[1].min(), ink_points[1].max() + 1
+        binary = binary[y1:y2, x1:x2]
+
+    h, w = binary.shape
+    if h == 0 or w == 0:
+        return np.zeros((size, size), dtype=np.uint8)
+
+    scale = size / max(h, w)
+    new_h, new_w = max(1, int(h * scale)), max(1, int(w * scale))
+    resized = cv2.resize(binary, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    # Center on black canvas (background = 0, ink = 255)
+    canvas = np.zeros((size, size), dtype=np.uint8)
     y_off = (size - new_h) // 2
     x_off = (size - new_w) // 2
     canvas[y_off:y_off + new_h, x_off:x_off + new_w] = resized
@@ -206,12 +225,13 @@ async def match_templates(
     query_image: np.ndarray,
     db: AsyncSession,
     top_k: int = 5,
-    max_hamming: int = 10,
+    max_hamming: int = 18,
 ) -> list[dict]:
     """Find most similar templates for a query character image.
 
     Two-phase matching:
     1. pHash: compute query hash, find all templates with Hamming distance < max_hamming
+       (18 = ~28% bit difference tolerance for handwritten variation)
     2. SSIM: load candidate images, compute structural similarity, rank by score
 
     Args:

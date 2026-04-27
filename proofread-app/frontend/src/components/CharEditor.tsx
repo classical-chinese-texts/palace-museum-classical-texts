@@ -91,24 +91,34 @@ export function CharEditor({ char, onConfirm, onCorrect, onDelete, onClose }: Pr
         <div className="mb-3">
           <div className="text-xs text-gray-500 mb-1">模板建議:</div>
           <div className="flex gap-1 flex-wrap">
-            {candidates!.template_matches.map((m) => (
-              <button
-                key={m.template_id}
-                onClick={() => onCorrect(char.id, m.text)}
-                className="flex items-center gap-1 px-2 py-1 bg-indigo-900 hover:bg-indigo-800 text-white rounded"
-                title={`模板相似度 ${Math.round(m.similarity * 100)}%`}
-              >
-                <img
-                  src={getTemplateImageUrl(m.template_id)}
-                  alt={m.text}
-                  className="w-6 h-6 rounded border border-gray-600"
-                />
-                <span className="text-lg">{m.text}</span>
-                <span className="text-xs text-indigo-300">
-                  {Math.round(m.similarity * 100)}%
-                </span>
-              </button>
-            ))}
+            {candidates!.template_matches.map((m) => {
+              const isTextMatch = m.hamming_distance === -1;
+              return (
+                <button
+                  key={m.template_id}
+                  onClick={() => onCorrect(char.id, m.text)}
+                  className={`flex items-center gap-1 px-2 py-1 text-white rounded ${
+                    isTextMatch
+                      ? 'bg-gray-700 hover:bg-gray-600'
+                      : 'bg-indigo-900 hover:bg-indigo-800'
+                  }`}
+                  title={isTextMatch
+                    ? `已確認模板「${m.text}」`
+                    : `圖像相似度 ${Math.round(m.similarity * 100)}%`
+                  }
+                >
+                  <img
+                    src={getTemplateImageUrl(m.template_id)}
+                    alt={m.text}
+                    className="w-6 h-6 rounded border border-gray-600"
+                  />
+                  <span className="text-lg">{m.text}</span>
+                  <span className="text-xs text-gray-400">
+                    {isTextMatch ? '字' : `${Math.round(m.similarity * 100)}%`}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
