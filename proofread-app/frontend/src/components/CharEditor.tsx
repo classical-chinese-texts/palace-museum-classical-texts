@@ -1,12 +1,12 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import type { Character, CandidateResult } from '../utils/api';
 import { getCandidates, getTemplateImageUrl } from '../utils/api';
 
 interface Props {
   char: Character | null;
-  onConfirm: (id: number) => void;
-  onCorrect: (id: number, text: string) => void;
-  onDelete: (id: number) => void;
+  onConfirm: (id: number) => Promise<void> | void;
+  onCorrect: (id: number, text: string) => Promise<void> | void;
+  onDelete: (id: number) => Promise<void> | void;
   onClose: () => void;
 }
 
@@ -14,12 +14,29 @@ export function CharEditor({ char, onConfirm, onCorrect, onDelete, onClose }: Pr
   const [inputText, setInputText] = useState('');
   const [candidates, setCandidates] = useState<CandidateResult | null>(null);
   const [loadingCandidates, setLoadingCandidates] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [flash, setFlash] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  const doCorrect = useCallback(async (id: number, text: string) => {
+    setSaving(true);
+    try {
+      await onCorrect(id, text);
+      setFlash(text);
+      setTimeout(() => setFlash(null), 1500);
+    } catch (e) {
+      setFlash(`失敗: ${e instanceof Error ? e.message : '未知錯誤'}`);
+      setTimeout(() => setFlash(null), 3000);
+    } finally {
+      setSaving(false);
+    }
+  }, [onCorrect]);
 
   useEffect(() => {
     if (char) {
       setInputText('');
       setCandidates(null);
+      setFlash(null);
       // Fetch candidates (template matches + confusables + variants)
       setLoadingCandidates(true);
       getCandidates(char.id)
@@ -50,9 +67,18 @@ export function CharEditor({ char, onConfirm, onCorrect, onDelete, onClose }: Pr
       </div>
 
       {/* Gap-fill hint */}
-      {char.ocr_engine === 'gap_fill' && (
+      {char.ocr_engine === 'gap_fill' && !char.corrected_text && (
         <div className="text-xs text-fuchsia-400 mb-2 bg-fuchsia-900/30 rounded px-2 py-1">
           空隙發現：OCR 未偵測此字，請目視辨識後輸入
+        </div>
+      )}
+
+      {/* Success/error flash */}
+      {flash && (
+        <div className={`text-xs mb-2 rounded px-2 py-1 ${
+          flash.startsWith('失敗') ? 'text-red-400 bg-red-900/30' : 'text-green-400 bg-green-900/30'
+        }`}>
+          {flash.startsWith('失敗') ? flash : `已修正為「${flash}」`}
         </div>
       )}
 
@@ -81,7 +107,7 @@ export function CharEditor({ char, onConfirm, onCorrect, onDelete, onClose }: Pr
             {char.alternatives.map((alt, i) => (
               <button
                 key={i}
-                onClick={() => onCorrect(char.id, alt.text)}
+                onClick={() => doCorrect(char.id, alt.text)}
                 className="px-3 py-1 bg-gray-700 hover:bg-gray-600 text-white rounded text-lg"
                 title={`${alt.engine} (${Math.round(alt.confidence * 100)}%)`}
               >
@@ -103,7 +129,7 @@ export function CharEditor({ char, onConfirm, onCorrect, onDelete, onClose }: Pr
               return (
                 <button
                   key={m.template_id}
-                  onClick={() => onCorrect(char.id, m.text)}
+                  onClick={() => doCorrect(char.id, m.text)}
                   className={`flex items-center gap-1 px-2 py-1 text-white rounded ${
                     isTextMatch
                       ? 'bg-gray-700 hover:bg-gray-600'
@@ -142,7 +168,7 @@ export function CharEditor({ char, onConfirm, onCorrect, onDelete, onClose }: Pr
             {candidates!.confusables.map((c, i) => (
               <button
                 key={`c-${i}`}
-                onClick={() => onCorrect(char.id, c)}
+                onClick={() => doCorrect(char.id, c)}
                 className="px-3 py-1 bg-amber-900 hover:bg-amber-800 text-white rounded text-lg"
                 title="形近字"
               >
@@ -152,7 +178,7 @@ export function CharEditor({ char, onConfirm, onCorrect, onDelete, onClose }: Pr
             {candidates!.variants.map((v, i) => (
               <button
                 key={`v-${i}`}
-                onClick={() => onCorrect(char.id, v)}
+                onClick={() => doCorrect(char.id, v)}
                 className="px-3 py-1 bg-teal-900 hover:bg-teal-800 text-white rounded text-lg"
                 title="異體字（正字）"
               >
@@ -175,8 +201,8 @@ export function CharEditor({ char, onConfirm, onCorrect, onDelete, onClose }: Pr
           value={inputText}
           onChange={e => setInputText(e.target.value)}
           onKeyDown={e => {
-            if (e.key === 'Enter' && inputText) {
-              onCorrect(char.id, inputText);
+            if (e.key === 'Enter' && inputText && !saving) {
+              doCorrect(char.id, inputText);
               setInputText('');
             }
           }}
@@ -185,15 +211,15 @@ export function CharEditor({ char, onConfirm, onCorrect, onDelete, onClose }: Pr
         />
         <button
           onClick={() => {
-            if (inputText) {
-              onCorrect(char.id, inputText);
+            if (inputText && !saving) {
+              doCorrect(char.id, inputText);
               setInputText('');
             }
           }}
-          disabled={!inputText}
+          disabled={!inputText || saving}
           className="px-3 py-1 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 text-white rounded"
         >
-          修正
+          {saving ? '...' : '修正'}
         </button>
       </div>
 

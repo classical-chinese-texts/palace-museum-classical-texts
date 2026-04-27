@@ -262,6 +262,13 @@ def discover_missing_chars(
     for c in existing_chars:
         col_groups[c.column_index].append(c)
 
+    # Pre-sort ALL existing chars by Y for cross-column overlap checking
+    # Bug fix: overlap check must include chars from ADJACENT columns whose
+    # X ranges overlap with the scan range. Col 10 (3 chars) scan range
+    # [487,561] covers Col 9 (24 chars at x≈500-520); checking only Col 10's
+    # 3 chars misses the 24 Col 9 chars → 21 false gap-fill discoveries.
+    all_chars_sorted = sorted(existing_chars, key=lambda c: c.bbox_y)
+
     discovered: list[DetectedChar] = []
 
     for col_idx, col_chars in col_groups.items():
@@ -274,6 +281,13 @@ def discover_missing_chars(
 
         x1 = max(0, int(col_x_center - median_w / 2 - x_pad))
         x2 = min(w_img, int(col_x_center + median_w / 2 + x_pad))
+
+        # Collect ALL existing chars whose X center falls in the scan range
+        # (not just this column's chars — catches adjacent column overlaps)
+        chars_in_range = [
+            c for c in all_chars_sorted
+            if x1 <= c.bbox_x + c.bbox_w / 2 <= x2
+        ]
 
         # Scan full page Y range for this column
         y1 = max(0, int(page_top) - 5)
@@ -289,13 +303,12 @@ def discover_missing_chars(
             row_proj, median_h, merge_gap, min_seg_height, ink_threshold_ratio,
         )
 
-        # Filter: remove segments overlapping existing chars in this column
-        col_chars_sorted = sorted(col_chars, key=lambda c: c.bbox_y)
+        # Filter: remove segments overlapping ANY existing char in scan X range
         for seg_start_rel, seg_end_rel in segments:
             seg_y1 = seg_start_rel + y1  # absolute Y coordinates
             seg_y2 = seg_end_rel + y1
 
-            if _overlaps_existing(seg_y1, seg_y2, col_chars_sorted):
+            if _overlaps_existing(seg_y1, seg_y2, chars_in_range):
                 continue
 
             # Tighten X bbox within this segment
