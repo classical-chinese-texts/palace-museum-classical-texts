@@ -1,12 +1,16 @@
 """Character CRUD router — correction, confirmation, merge, split."""
-from fastapi import APIRouter, Depends, HTTPException
+import logging
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import CONFIDENCE_THRESHOLD
-from ..database import get_db
+from ..database import get_db, async_session
 from ..models import Page, Character, CorrectionLog
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["characters"])
 
@@ -326,7 +330,11 @@ async def split_character(char_id: int, body: SplitRequest, db: AsyncSession = D
 
 
 @router.post("/api/pages/{page_id}/characters/confirm-all")
-async def confirm_all_above_threshold(page_id: int, db: AsyncSession = Depends(get_db)):
+async def confirm_all_above_threshold(
+    page_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     page = await db.get(Page, page_id)
     if not page:
         raise HTTPException(404, "Page not found")
@@ -341,6 +349,7 @@ async def confirm_all_above_threshold(page_id: int, db: AsyncSession = Depends(g
     )
     chars = result.scalars().all()
     count = 0
+    template_candidates = []
     for c in chars:
         c.is_confirmed = True
         db.add(CorrectionLog(
@@ -348,9 +357,24 @@ async def confirm_all_above_threshold(page_id: int, db: AsyncSession = Depends(g
             new_text=c.display_text, action="confirm",
         ))
         count += 1
+        if c.display_text and c.display_text != "□":
+            template_candidates.append({
+                "text": c.display_text,
+                "bbox_x": c.bbox_x, "bbox_y": c.bbox_y,
+                "bbox_w": c.bbox_w, "bbox_h": c.bbox_h,
+                "page_id": c.page_id, "char_id": c.id,
+            })
 
     await db.commit()
     await _update_page_stats(page_id, db)
+
+    # Save templates in background (non-blocking)
+    if template_candidates and page.image_path:
+        background_tasks.add_task(
+            _save_templates_background,
+            page.image_path, template_candidates,
+        )
+
     return {"confirmed": count}
 
 
@@ -425,3 +449,28 @@ async def _update_page_stats(page_id: int, db: AsyncSession):
     page.confirmed_chars = confirmed.scalar() or 0
     page.low_confidence_chars = low_conf.scalar() or 0
     await db.commit()
+
+
+async def _save_templates_background(
+    image_path: str, candidates: list[dict]
+):
+    """Save templates for batch-confirmed characters (background task)."""
+    from ..services.template_service import save_template
+
+    saved = 0
+    async with async_session() as db:
+        for c in candidates:
+            try:
+                await save_template(
+                    text=c["text"],
+                    page_image_path=image_path,
+                    bbox_x=c["bbox_x"], bbox_y=c["bbox_y"],
+                    bbox_w=c["bbox_w"], bbox_h=c["bbox_h"],
+                    page_id=c["page_id"], char_id=c["char_id"],
+                    db=db,
+                )
+                saved += 1
+            except Exception:
+                logger.warning("Template save failed for char %d", c["char_id"], exc_info=True)
+        await db.commit()
+    logger.info("Saved %d/%d templates in background", saved, len(candidates))
