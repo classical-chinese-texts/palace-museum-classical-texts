@@ -11,6 +11,15 @@ Gap-fill: discovers characters kraken missed entirely by scanning column
 gaps for ink segments via Y projection. Uses median char height from
 existing detections to determine segment boundaries.
 
+Border line removal (v2, 2026-04-26):
+Uses create_clean_binary() to remove horizontal/vertical border lines
+from the binary image before ink projection. This prevents chars like "太"
+from being anchored to the divider line at y≈1089-1103.
+
+Region-constrained gap-fill (v2):
+Scans top and bottom text regions separately (skips divider area)
+to avoid false discoveries on the border line.
+
 Tested on P1 (1398x2016, 260 chars):
 - search_pad=5 finds ink that may be slightly outside kraken bbox
 - Capping at original ± result_pad prevents 16px systematic overlap
@@ -23,8 +32,20 @@ import cv2
 import numpy as np
 
 from .char_detection import DetectedChar
+from .page_segmentation import PageLayout, create_clean_binary, get_char_region
 
 logger = logging.getLogger(__name__)
+
+
+def _make_binary(image_path: str) -> np.ndarray | None:
+    """Create standard binary image (no border line removal)."""
+    img = cv2.imread(image_path)
+    if img is None:
+        return None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    return cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
 
 def cca_anchor_characters(
@@ -33,6 +54,7 @@ def cca_anchor_characters(
     search_pad: int = 5,
     result_pad: int = 3,
     min_ink_ratio: float = 0.03,
+    layout: PageLayout | None = None,
 ) -> list[DetectedChar]:
     """Tighten kraken bboxes to actual ink boundaries.
 
@@ -41,6 +63,11 @@ def cca_anchor_characters(
     2. If ink found: project X/Y axes → tight bbox + result_pad
     3. If no ink found (kraken misposition): expand search to find ink,
        then re-center the ORIGINAL-SIZED bbox on the found ink center
+
+    When layout is provided, uses create_clean_binary() to remove border
+    lines from the binary image before processing. This prevents chars
+    near the divider line (e.g. "太" at y≈1087) from being anchored
+    to border ink instead of character ink.
     """
     img = cv2.imread(image_path)
     if img is None:
@@ -49,10 +76,17 @@ def cca_anchor_characters(
 
     h_img, w_img = img.shape[:2]
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    # Use clean binary (border lines + divider removed) when layout is available
+    if layout is not None:
+        binary = create_clean_binary(image_path, layout=layout)
+        if binary is None:
+            logger.warning("create_clean_binary failed, falling back to standard binary")
+            binary = _make_binary(image_path)
+    else:
+        binary = _make_binary(image_path)
+
+    if binary is None:
+        return kraken_chars
 
     tightened = 0
     recentered = 0
@@ -60,16 +94,29 @@ def cca_anchor_characters(
     # Compute median char size for detecting broken kraken bboxes
     # P1 stats: median w=58, h=67
     areas = [c.bbox_w * c.bbox_h for c in kraken_chars if c.bbox_w > 0 and c.bbox_h > 0]
+    heights = [c.bbox_h for c in kraken_chars if c.bbox_h > 0]
+    widths = [c.bbox_w for c in kraken_chars if c.bbox_w > 0]
     median_area = float(np.median(areas)) if areas else 0.0
+    median_h = float(np.median(heights)) if heights else 0.0
+    median_w = float(np.median(widths)) if widths else 0.0
 
     for c in kraken_chars:
         orig_x = c.bbox_x
         orig_y = c.bbox_y
         orig_w = c.bbox_w
         orig_h = c.bbox_h
-        # Skip cap if original bbox is broken (< 25% of median area)
-        # e.g. 悔: 8x16=128 vs median ~3886 → skip cap, use full ink extent
+        # Skip cap if original bbox is broken:
+        # 1. Area too small (< 25% of median) — e.g. 悔: 8x16=128 vs median ~3886
+        # 2. Badly shaped — one dimension is extreme relative to median
+        #    e.g. 太(post-CCA-v1): h=28 (42% of median 67), w=82 (141% of median 58)
+        #    Area 2296 is fine (60% of 3886) but shape is wrong
         skip_cap = (orig_w * orig_h) < (median_area * 0.25)
+        if not skip_cap and median_h > 0 and median_w > 0:
+            h_ratio = orig_h / median_h
+            w_ratio = orig_w / median_w
+            # Bbox height < 50% of median OR width > 180% of median → broken shape
+            if h_ratio < 0.5 or w_ratio > 1.8 or h_ratio > 2.0 or w_ratio < 0.3:
+                skip_cap = True
 
         # Use wider search for broken bboxes so we find the full character
         # P1: 悔 was 8x16 → search_pad=5 only finds 18x16; pad=20 finds full char
@@ -92,6 +139,40 @@ def cca_anchor_characters(
                 skip_cap=skip_cap,
             )
             tightened += 1
+
+            # Post-tightening check: if result is unreasonably small,
+            # the char may have been tightened onto noise/border residue
+            # instead of actual character ink.
+            # P1: 太 PRE=(1132,1081,76,63) → tightened to h=10 (15% of median 67)
+            # because divider cleanup left small ink fragments.
+            # Fix: restore Kraken's original position and median size,
+            # then re-center using region-masked binary (exclude opposite
+            # region to prevent ink from neighboring chars pulling the
+            # center-of-mass in the wrong direction).
+            if median_h > 0 and c.bbox_h < median_h * 0.4:
+                # Restore to original Kraken position with median size
+                c.bbox_x = orig_x
+                c.bbox_y = orig_y
+                c.bbox_w = median_w
+                c.bbox_h = median_h
+
+                # For divider-adjacent chars, mask opposite region
+                # Use bbox TOP edge (not center) to determine region,
+                # since divider-adjacent chars have centers past the divider.
+                # P1: 太 orig_y=1081 < divider_start=1089 → top region
+                region_binary = binary
+                if layout is not None:
+                    if orig_y < layout.divider_y_start:
+                        # Char starts in top region → zero out bottom
+                        region_binary = binary.copy()
+                        region_binary[layout.divider_y_start:, :] = 0
+                    elif orig_y > layout.divider_y_end:
+                        # Char starts in bottom region → zero out top
+                        region_binary = binary.copy()
+                        region_binary[:layout.divider_y_end, :] = 0
+
+                if _recenter_on_ink(c, region_binary, h_img, w_img, min_ink_ratio):
+                    recentered += 1
         else:
             # Rare case (3/260 on P1): kraken bbox is offset from actual char.
             # Expand search to find ink, then re-center original-sized bbox.
@@ -165,7 +246,7 @@ def _recenter_on_ink(
     orig_w = c.bbox_w
     orig_h = c.bbox_h
 
-    for pad in [15, 25]:
+    for pad in [15, 25, 40]:
         x1 = max(0, int(c.bbox_x) - pad)
         y1 = max(0, int(c.bbox_y) - pad)
         x2 = min(w_img, int(c.bbox_x + c.bbox_w) + pad)
@@ -212,38 +293,44 @@ def discover_missing_chars(
     merge_gap: int = 20,
     min_seg_height: int = 15,
     ink_threshold_ratio: float = 0.05,
+    layout: PageLayout | None = None,
 ) -> list[DetectedChar]:
     """Discover characters kraken missed by scanning column gaps for ink.
 
     Algorithm:
     1. Group existing chars into columns by X center
     2. For each column, compute X range from median char center ± median_w/2
-    3. Scan full page Y range using Y projection (sum of ink per row)
+    3. Scan Y range using Y projection (sum of ink per row)
     4. Find ink segments (contiguous rows above threshold)
     5. Merge close segments (strokes of same char, gap < merge_gap)
     6. Split over-tall segments (> 1.5 × median_h)
     7. Filter out segments overlapping existing chars
     8. Create DetectedChar entries for remaining segments (text=None, confidence=0)
 
+    Region-constrained (v2): when layout is provided, scans top and bottom
+    text regions SEPARATELY (skips divider area y=1089-1103). This prevents
+    false gap-fill discoveries on the border line and ensures proper
+    region boundaries.
+
     Tested on P1:
     - median_h=67, median_w=58 (from 260 existing chars)
     - merge_gap=20 (~30% median_h): merges multi-stroke chars
     - min_seg_height=15: filters noise and border line fragments
-    - Discovers chars in gaps like Col5 (506px, ~8 chars) and Col10 (902px, ~13 chars)
     """
     if not existing_chars or len(existing_chars) < 5:
         return []
 
-    img = cv2.imread(image_path)
-    if img is None:
-        logger.warning("Cannot read image %s for gap-fill", image_path)
+    # Use clean binary (border lines + divider removed) when layout is available
+    if layout is not None:
+        binary = create_clean_binary(image_path, layout=layout)
+    else:
+        binary = _make_binary(image_path)
+
+    if binary is None:
+        logger.warning("Cannot create binary for %s, skipping gap-fill", image_path)
         return []
 
-    h_img, w_img = img.shape[:2]
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    h_img, w_img = binary.shape[:2]
 
     # Page-level statistics from existing detections
     # P1 stats: median_h=67, median_w=58
@@ -252,9 +339,19 @@ def discover_missing_chars(
     median_h = float(np.median(heights))
     median_w = float(np.median(widths))
 
-    # Page Y extent from all existing chars
-    page_top = min(c.bbox_y for c in existing_chars)
-    page_bottom = max(c.bbox_y + c.bbox_h for c in existing_chars)
+    # Define Y scan ranges: either per-region (top/bottom) or full page
+    if layout is not None:
+        # Scan top and bottom text regions separately
+        # Skip divider area to avoid false discoveries on border line
+        scan_ranges = [
+            (layout.top_text.y_start, layout.top_text.y_end),
+            (layout.bottom_text.y_start, layout.bottom_text.y_end),
+        ]
+    else:
+        # Fallback: full page Y extent
+        page_top = min(c.bbox_y for c in existing_chars)
+        page_bottom = max(c.bbox_y + c.bbox_h for c in existing_chars)
+        scan_ranges = [(max(0, int(page_top) - 5), min(h_img, int(page_bottom) + 5))]
 
     # Group chars by column_index (set by _assign_reading_order before this call)
     from collections import defaultdict
@@ -263,10 +360,6 @@ def discover_missing_chars(
         col_groups[c.column_index].append(c)
 
     # Pre-sort ALL existing chars by Y for cross-column overlap checking
-    # Bug fix: overlap check must include chars from ADJACENT columns whose
-    # X ranges overlap with the scan range. Col 10 (3 chars) scan range
-    # [487,561] covers Col 9 (24 chars at x≈500-520); checking only Col 10's
-    # 3 chars misses the 24 Col 9 chars → 21 false gap-fill discoveries.
     all_chars_sorted = sorted(existing_chars, key=lambda c: c.bbox_y)
 
     discovered: list[DetectedChar] = []
@@ -283,64 +376,60 @@ def discover_missing_chars(
         x2 = min(w_img, int(col_x_center + median_w / 2 + x_pad))
 
         # Collect ALL existing chars whose X center falls in the scan range
-        # (not just this column's chars — catches adjacent column overlaps)
         chars_in_range = [
             c for c in all_chars_sorted
             if x1 <= c.bbox_x + c.bbox_w / 2 <= x2
         ]
 
-        # Scan full page Y range for this column
-        y1 = max(0, int(page_top) - 5)
-        y2 = min(h_img, int(page_bottom) + 5)
-        crop = binary[y1:y2, x1:x2]
-        if crop.size == 0:
-            continue
-
-        row_proj = np.sum(crop, axis=1).astype(float)
-
-        # Find and merge ink segments
-        segments = _find_ink_segments(
-            row_proj, median_h, merge_gap, min_seg_height, ink_threshold_ratio,
-        )
-
-        # Filter: remove segments overlapping ANY existing char in scan X range
-        for seg_start_rel, seg_end_rel in segments:
-            seg_y1 = seg_start_rel + y1  # absolute Y coordinates
-            seg_y2 = seg_end_rel + y1
-
-            if _overlaps_existing(seg_y1, seg_y2, chars_in_range):
+        # Scan each Y range separately (top region, bottom region)
+        for y1, y2 in scan_ranges:
+            y1 = max(0, y1)
+            y2 = min(h_img, y2)
+            crop = binary[y1:y2, x1:x2]
+            if crop.size == 0:
                 continue
 
-            # Tighten X bbox within this segment
-            seg_crop = crop[seg_start_rel:seg_end_rel, :]
-            col_proj = np.sum(seg_crop, axis=0)
-            ink_cols = np.where(col_proj > 0)[0]
-            if len(ink_cols) > 2:
-                tight_x = float(ink_cols[0] + x1 - 3)
-                tight_w = float(ink_cols[-1] - ink_cols[0] + 7)
-            else:
-                continue  # No real ink in this segment
+            row_proj = np.sum(crop, axis=1).astype(float)
 
-            tight_y = float(seg_y1)
-            tight_h = float(seg_y2 - seg_y1)
+            segments = _find_ink_segments(
+                row_proj, median_h, merge_gap, min_seg_height, ink_threshold_ratio,
+            )
 
-            # Sanity: reject border-line-shaped segments
-            # Border lines: width > 2× height (horizontal line)
-            if tight_w > tight_h * 2.5 and tight_h < median_h * 0.4:
-                continue
+            for seg_start_rel, seg_end_rel in segments:
+                seg_y1 = seg_start_rel + y1  # absolute Y coordinates
+                seg_y2 = seg_end_rel + y1
 
-            discovered.append(DetectedChar(
-                bbox_x=tight_x,
-                bbox_y=tight_y,
-                bbox_w=tight_w,
-                bbox_h=tight_h,
-                text=None,
-                confidence=0.0,
-                engine="gap_fill",
-            ))
+                if _overlaps_existing(seg_y1, seg_y2, chars_in_range):
+                    continue
+
+                # Tighten X bbox within this segment
+                seg_crop = crop[seg_start_rel:seg_end_rel, :]
+                col_proj = np.sum(seg_crop, axis=0)
+                ink_cols = np.where(col_proj > 0)[0]
+                if len(ink_cols) > 2:
+                    tight_x = float(ink_cols[0] + x1 - 3)
+                    tight_w = float(ink_cols[-1] - ink_cols[0] + 7)
+                else:
+                    continue  # No real ink in this segment
+
+                tight_y = float(seg_y1)
+                tight_h = float(seg_y2 - seg_y1)
+
+                # Sanity: reject border-line-shaped segments
+                if tight_w > tight_h * 2.5 and tight_h < median_h * 0.4:
+                    continue
+
+                discovered.append(DetectedChar(
+                    bbox_x=tight_x,
+                    bbox_y=tight_y,
+                    bbox_w=tight_w,
+                    bbox_h=tight_h,
+                    text=None,
+                    confidence=0.0,
+                    engine="gap_fill",
+                ))
 
     # Deduplicate: remove discoveries whose center is within 15px of another
-    # (happens when adjacent columns have overlapping X scan ranges)
     deduped = _dedup_discovered(discovered)
 
     logger.info("Gap-fill discovered %d chars (%d before dedup) across %d columns",

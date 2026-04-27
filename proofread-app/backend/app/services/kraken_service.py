@@ -3,6 +3,13 @@
 Key: ALTO Glyph HEIGHT is always 0 for baseline OCR.
 We compute real char height from consecutive glyph VPOS within each TextLine.
 After parsing, ink-tightening refines bboxes to actual character boundaries.
+
+Page segmentation (v2, 2026-04-26):
+Traditional Chinese thread-bound book pages have three regions:
+  上半葉 (top text) | 版心 divider | 下半葉 (bottom text)
+Reading order: right-to-left columns; within each physical column,
+top-half chars first then bottom-half chars (the column continues
+across the fold).
 """
 import statistics
 import subprocess
@@ -13,6 +20,7 @@ import numpy as np
 
 from ..config import KRAKEN_ENV, CHAT_MODELS_DIR, KRAKEN_SEG_MODEL, KRAKEN_REC_MODEL
 from .char_detection import DetectedChar
+from .page_segmentation import PageLayout, detect_page_layout, get_char_region
 
 
 def run_kraken_ocr(image_path: str) -> list[DetectedChar]:
@@ -59,10 +67,15 @@ def run_kraken_ocr(image_path: str) -> list[DetectedChar]:
         import os
         os.unlink(output_path)
 
-    return _parse_alto_xml(xml_str, image_path)
+    # Detect page layout (top/bottom regions + divider) before post-processing
+    layout = detect_page_layout(image_path)
+
+    return _parse_alto_xml(xml_str, image_path, layout=layout)
 
 
-def _parse_alto_xml(xml_str: str, image_path: str) -> list[DetectedChar]:
+def _parse_alto_xml(
+    xml_str: str, image_path: str, layout: PageLayout | None = None,
+) -> list[DetectedChar]:
     """Parse ALTO XML, computing real char heights from consecutive glyph positions."""
     try:
         root = ET.fromstring(xml_str)
@@ -172,16 +185,16 @@ def _parse_alto_xml(xml_str: str, image_path: str) -> list[DetectedChar]:
 
     # CCA-anchor bboxes using real ink contours (replaces _ink_tighten)
     from .cca_service import cca_anchor_characters, discover_missing_chars
-    chars = cca_anchor_characters(image_path, chars)
+    chars = cca_anchor_characters(image_path, chars, layout=layout)
 
     # First pass: assign reading order so gap-fill can use column_index
-    _assign_reading_order(chars)
+    _assign_reading_order(chars, layout=layout)
 
     # Discover characters kraken missed (scan column gaps for ink)
-    gap_chars = discover_missing_chars(image_path, chars)
+    gap_chars = discover_missing_chars(image_path, chars, layout=layout)
     if gap_chars:
         chars.extend(gap_chars)
-        _assign_reading_order(chars)  # Re-assign with new chars included
+        _assign_reading_order(chars, layout=layout)  # Re-assign with new chars
 
     return chars
 
@@ -245,18 +258,36 @@ def _ink_tighten(chars: list[DetectedChar], image_path: str) -> list[DetectedCha
     return chars
 
 
-def _assign_reading_order(chars: list[DetectedChar], x_threshold: float = 40.0):
-    """Assign column/char indices for traditional Chinese reading order."""
+def _assign_reading_order(
+    chars: list[DetectedChar],
+    x_threshold: float = 40.0,
+    layout: PageLayout | None = None,
+):
+    """Assign column/char indices for traditional Chinese reading order.
+
+    When layout is provided (page has top/bottom regions separated by a
+    horizontal divider), chars in the same physical column are ordered:
+    top-region chars first (by Y), then bottom-region chars (by Y).
+    This matches thread-bound book reading order where each column
+    continues across the page fold.
+
+    Chars on the divider line or in the 版心 strip are placed at the end
+    with special column indices.
+    """
     if not chars:
         return
 
-    chars.sort(key=lambda c: -c.bbox_x)
+    divider_y = layout.divider_y_center if layout else None
 
+    # Sort by X center descending (right to left)
+    chars.sort(key=lambda c: -(c.bbox_x + c.bbox_w / 2))
+
+    # Group into columns by X center proximity
     columns: list[list[DetectedChar]] = []
     current_col: list[DetectedChar] = [chars[0]]
 
     for c in chars[1:]:
-        cur_center = current_col[0].bbox_x + current_col[0].bbox_w / 2
+        cur_center = sum(ch.bbox_x + ch.bbox_w / 2 for ch in current_col) / len(current_col)
         c_center = c.bbox_x + c.bbox_w / 2
         if abs(c_center - cur_center) < x_threshold:
             current_col.append(c)
@@ -266,7 +297,18 @@ def _assign_reading_order(chars: list[DetectedChar], x_threshold: float = 40.0):
     columns.append(current_col)
 
     for col_idx, col in enumerate(columns):
-        col.sort(key=lambda c: c.bbox_y)
+        if divider_y is not None:
+            # Region-aware sort: top-region chars first, then bottom-region
+            # Within each region, sort by Y (top to bottom)
+            def _region_sort_key(c, _dy=divider_y):
+                center_y = c.bbox_y + c.bbox_h / 2
+                region = 0 if center_y < _dy else 1
+                return (region, c.bbox_y)
+
+            col.sort(key=_region_sort_key)
+        else:
+            col.sort(key=lambda c: c.bbox_y)
+
         for char_idx, c in enumerate(col):
             c.column_index = col_idx
             c.char_index = char_idx
