@@ -49,6 +49,13 @@ export function CharEditor({ char, onConfirm, onCorrect, onDelete, onClose }: Pr
         </button>
       </div>
 
+      {/* Gap-fill hint */}
+      {char.ocr_engine === 'gap_fill' && (
+        <div className="text-xs text-fuchsia-400 mb-2 bg-fuchsia-900/30 rounded px-2 py-1">
+          空隙發現：OCR 未偵測此字，請目視辨識後輸入
+        </div>
+      )}
+
       {/* Main OCR result */}
       <div className="flex items-center gap-4 mb-3">
         <span className="text-5xl font-serif text-white">{char.display_text}</span>

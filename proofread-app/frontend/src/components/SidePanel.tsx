@@ -37,6 +37,10 @@ export function SidePanel({ characters, selectedId, pageId, onSelect }: Props) {
             <span className="w-3 h-3 rounded bg-red-500 inline-block" />
             <span className="text-gray-300">已修正</span>
           </div>
+          <div className="flex items-center gap-2">
+            <span className="w-3 h-3 rounded border border-dashed border-fuchsia-500 inline-block" />
+            <span className="text-gray-300">待辨識 (空隙發現)</span>
+          </div>
         </div>
       </div>
 
