@@ -171,9 +171,18 @@ def _parse_alto_xml(xml_str: str, image_path: str) -> list[DetectedChar]:
                 ))
 
     # CCA-anchor bboxes using real ink contours (replaces _ink_tighten)
-    from .cca_service import cca_anchor_characters
+    from .cca_service import cca_anchor_characters, discover_missing_chars
     chars = cca_anchor_characters(image_path, chars)
+
+    # First pass: assign reading order so gap-fill can use column_index
     _assign_reading_order(chars)
+
+    # Discover characters kraken missed (scan column gaps for ink)
+    gap_chars = discover_missing_chars(image_path, chars)
+    if gap_chars:
+        chars.extend(gap_chars)
+        _assign_reading_order(chars)  # Re-assign with new chars included
+
     return chars
 
 

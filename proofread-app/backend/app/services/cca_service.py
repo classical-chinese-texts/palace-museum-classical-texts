@@ -7,10 +7,15 @@ expanding into neighboring characters in dense vertical text.
 Progressive re-center: chars with 0% ink at search_pad=5 get re-centered
 using a wider search, but bbox SIZE is capped at the original kraken size.
 
+Gap-fill: discovers characters kraken missed entirely by scanning column
+gaps for ink segments via Y projection. Uses median char height from
+existing detections to determine segment boundaries.
+
 Tested on P1 (1398x2016, 260 chars):
 - search_pad=5 finds ink that may be slightly outside kraken bbox
 - Capping at original ± result_pad prevents 16px systematic overlap
 - 3 chars with 0% ink get re-centered via progressive search
+- Gap-fill discovers ~70+ missing chars in 14 column gaps
 """
 import logging
 
@@ -197,4 +202,301 @@ def _recenter_on_ink(
         c.bbox_h = orig_h
         return True
 
+    return False
+
+
+def discover_missing_chars(
+    image_path: str,
+    existing_chars: list[DetectedChar],
+    x_pad: int = 8,
+    merge_gap: int = 20,
+    min_seg_height: int = 15,
+    ink_threshold_ratio: float = 0.05,
+) -> list[DetectedChar]:
+    """Discover characters kraken missed by scanning column gaps for ink.
+
+    Algorithm:
+    1. Group existing chars into columns by X center
+    2. For each column, compute X range from median char center ± median_w/2
+    3. Scan full page Y range using Y projection (sum of ink per row)
+    4. Find ink segments (contiguous rows above threshold)
+    5. Merge close segments (strokes of same char, gap < merge_gap)
+    6. Split over-tall segments (> 1.5 × median_h)
+    7. Filter out segments overlapping existing chars
+    8. Create DetectedChar entries for remaining segments (text=None, confidence=0)
+
+    Tested on P1:
+    - median_h=67, median_w=58 (from 260 existing chars)
+    - merge_gap=20 (~30% median_h): merges multi-stroke chars
+    - min_seg_height=15: filters noise and border line fragments
+    - Discovers chars in gaps like Col5 (506px, ~8 chars) and Col10 (902px, ~13 chars)
+    """
+    if not existing_chars or len(existing_chars) < 5:
+        return []
+
+    img = cv2.imread(image_path)
+    if img is None:
+        logger.warning("Cannot read image %s for gap-fill", image_path)
+        return []
+
+    h_img, w_img = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+
+    # Page-level statistics from existing detections
+    # P1 stats: median_h=67, median_w=58
+    heights = [c.bbox_h for c in existing_chars if c.bbox_h > 0]
+    widths = [c.bbox_w for c in existing_chars if c.bbox_w > 0]
+    median_h = float(np.median(heights))
+    median_w = float(np.median(widths))
+
+    # Page Y extent from all existing chars
+    page_top = min(c.bbox_y for c in existing_chars)
+    page_bottom = max(c.bbox_y + c.bbox_h for c in existing_chars)
+
+    # Group chars by column_index (set by _assign_reading_order before this call)
+    from collections import defaultdict
+    col_groups: dict[int, list[DetectedChar]] = defaultdict(list)
+    for c in existing_chars:
+        col_groups[c.column_index].append(c)
+
+    discovered: list[DetectedChar] = []
+
+    for col_idx, col_chars in col_groups.items():
+        if len(col_chars) < 2:
+            continue  # Skip singleton columns (unreliable X position)
+
+        # Column X center from existing chars
+        x_centers = [c.bbox_x + c.bbox_w / 2 for c in col_chars]
+        col_x_center = float(np.median(x_centers))
+
+        x1 = max(0, int(col_x_center - median_w / 2 - x_pad))
+        x2 = min(w_img, int(col_x_center + median_w / 2 + x_pad))
+
+        # Scan full page Y range for this column
+        y1 = max(0, int(page_top) - 5)
+        y2 = min(h_img, int(page_bottom) + 5)
+        crop = binary[y1:y2, x1:x2]
+        if crop.size == 0:
+            continue
+
+        row_proj = np.sum(crop, axis=1).astype(float)
+
+        # Find and merge ink segments
+        segments = _find_ink_segments(
+            row_proj, median_h, merge_gap, min_seg_height, ink_threshold_ratio,
+        )
+
+        # Filter: remove segments overlapping existing chars in this column
+        col_chars_sorted = sorted(col_chars, key=lambda c: c.bbox_y)
+        for seg_start_rel, seg_end_rel in segments:
+            seg_y1 = seg_start_rel + y1  # absolute Y coordinates
+            seg_y2 = seg_end_rel + y1
+
+            if _overlaps_existing(seg_y1, seg_y2, col_chars_sorted):
+                continue
+
+            # Tighten X bbox within this segment
+            seg_crop = crop[seg_start_rel:seg_end_rel, :]
+            col_proj = np.sum(seg_crop, axis=0)
+            ink_cols = np.where(col_proj > 0)[0]
+            if len(ink_cols) > 2:
+                tight_x = float(ink_cols[0] + x1 - 3)
+                tight_w = float(ink_cols[-1] - ink_cols[0] + 7)
+            else:
+                continue  # No real ink in this segment
+
+            tight_y = float(seg_y1)
+            tight_h = float(seg_y2 - seg_y1)
+
+            # Sanity: reject border-line-shaped segments
+            # Border lines: width > 2× height (horizontal line)
+            if tight_w > tight_h * 2.5 and tight_h < median_h * 0.4:
+                continue
+
+            discovered.append(DetectedChar(
+                bbox_x=tight_x,
+                bbox_y=tight_y,
+                bbox_w=tight_w,
+                bbox_h=tight_h,
+                text=None,
+                confidence=0.0,
+                engine="gap_fill",
+            ))
+
+    # Deduplicate: remove discoveries whose center is within 15px of another
+    # (happens when adjacent columns have overlapping X scan ranges)
+    deduped = _dedup_discovered(discovered)
+
+    logger.info("Gap-fill discovered %d chars (%d before dedup) across %d columns",
+                len(deduped), len(discovered), len(col_groups))
+    return deduped
+
+
+def _dedup_discovered(chars: list[DetectedChar], min_dist: float = 15.0) -> list[DetectedChar]:
+    """Remove duplicate discoveries whose centers are within min_dist pixels.
+
+    When adjacent columns have overlapping X scan ranges, the same ink region
+    gets discovered twice. Keep the one with the tighter (smaller area) bbox.
+    """
+    if len(chars) <= 1:
+        return chars
+
+    # Sort by Y then X for consistent ordering
+    chars.sort(key=lambda c: (c.bbox_y, c.bbox_x))
+    keep = [True] * len(chars)
+
+    for i in range(len(chars)):
+        if not keep[i]:
+            continue
+        ci_cx = chars[i].bbox_x + chars[i].bbox_w / 2
+        ci_cy = chars[i].bbox_y + chars[i].bbox_h / 2
+        ci_area = chars[i].bbox_w * chars[i].bbox_h
+
+        for j in range(i + 1, len(chars)):
+            if not keep[j]:
+                continue
+            cj_cy = chars[j].bbox_y + chars[j].bbox_h / 2
+            # Early exit: Y distance too large (chars sorted by Y)
+            if cj_cy - ci_cy > min_dist * 3:
+                break
+
+            cj_cx = chars[j].bbox_x + chars[j].bbox_w / 2
+            dist = ((ci_cx - cj_cx) ** 2 + (ci_cy - cj_cy) ** 2) ** 0.5
+            if dist < min_dist:
+                # Keep the one with smaller area (tighter bbox)
+                cj_area = chars[j].bbox_w * chars[j].bbox_h
+                if cj_area < ci_area:
+                    keep[i] = False
+                    break
+                else:
+                    keep[j] = False
+
+    return [c for c, k in zip(chars, keep) if k]
+
+
+def _group_columns(
+    chars: list[DetectedChar], x_threshold: float = 40.0,
+) -> list[list[DetectedChar]]:
+    """Group characters into columns by X center proximity."""
+    if not chars:
+        return []
+
+    sorted_chars = sorted(chars, key=lambda c: -(c.bbox_x + c.bbox_w / 2))
+    columns: list[list[DetectedChar]] = [[sorted_chars[0]]]
+
+    for c in sorted_chars[1:]:
+        c_center = c.bbox_x + c.bbox_w / 2
+        col_center = np.mean([ch.bbox_x + ch.bbox_w / 2 for ch in columns[-1]])
+        if abs(c_center - col_center) < x_threshold:
+            columns[-1].append(c)
+        else:
+            columns.append([c])
+
+    return columns
+
+
+def _find_ink_segments(
+    row_proj: np.ndarray,
+    median_h: float,
+    merge_gap: int = 20,
+    min_seg_height: int = 15,
+    threshold_ratio: float = 0.05,
+) -> list[tuple[int, int]]:
+    """Find character-sized ink segments in a Y projection profile.
+
+    1. Find contiguous rows above ink threshold
+    2. Merge close segments (multi-stroke chars like 八, 心)
+    3. Split over-tall segments at internal projection minima
+
+    Args:
+        row_proj: Sum of ink per row (Y axis projection).
+        median_h: Median character height (67px on P1).
+        merge_gap: Max gap between segments to merge (20px ≈ 30% of median_h).
+        min_seg_height: Reject segments shorter than this (15px = noise filter).
+        threshold_ratio: Ink threshold as fraction of max projection value.
+
+    Returns:
+        List of (start_row, end_row) tuples in projection-relative coordinates.
+    """
+    if len(row_proj) == 0 or row_proj.max() == 0:
+        return []
+
+    threshold = max(row_proj.max() * threshold_ratio, 50)
+
+    # Phase 1: Find raw ink segments
+    raw_segments: list[list[int]] = []
+    in_ink = False
+    start = 0
+    for i, val in enumerate(row_proj):
+        if val > threshold and not in_ink:
+            start = i
+            in_ink = True
+        elif val <= threshold and in_ink:
+            raw_segments.append([start, i])
+            in_ink = False
+    if in_ink:
+        raw_segments.append([start, len(row_proj)])
+
+    if not raw_segments:
+        return []
+
+    # Phase 2: Merge close segments (strokes of same character)
+    # merge_gap=20 ≈ 30% of median_h=67, handles chars like 八 心 小
+    merged: list[list[int]] = [raw_segments[0]]
+    for s, e in raw_segments[1:]:
+        gap = s - merged[-1][1]
+        combined_h = e - merged[-1][0]
+        # Merge if gap is small AND combined height is reasonable for one char
+        if gap < merge_gap and combined_h <= median_h * 1.4:
+            merged[-1][1] = e
+        else:
+            merged.append([s, e])
+
+    # Phase 3: Split over-tall segments at internal minima
+    final: list[tuple[int, int]] = []
+    for s, e in merged:
+        height = e - s
+        if height < min_seg_height:
+            continue
+        if height > median_h * 1.5:
+            # Split into n estimated characters
+            n_est = max(2, round(height / median_h))
+            seg_proj = row_proj[s:e]
+            splits = [s]
+            for k in range(1, n_est):
+                target = int(k * height / n_est)
+                # Search ±30% of expected char size for the minimum
+                search_range = int(height / n_est * 0.3)
+                lo = max(0, target - search_range)
+                hi = min(len(seg_proj), target + search_range)
+                if hi > lo:
+                    local_min_idx = lo + int(np.argmin(seg_proj[lo:hi]))
+                    splits.append(s + local_min_idx)
+            splits.append(e)
+            for k in range(len(splits) - 1):
+                seg_h = splits[k + 1] - splits[k]
+                if seg_h >= min_seg_height:
+                    final.append((splits[k], splits[k + 1]))
+        else:
+            final.append((s, e))
+
+    return final
+
+
+def _overlaps_existing(
+    seg_y1: float, seg_y2: float, sorted_chars: list[DetectedChar],
+) -> bool:
+    """Check if a Y segment overlaps any existing character bbox."""
+    for c in sorted_chars:
+        c_y1 = c.bbox_y
+        c_y2 = c.bbox_y + c.bbox_h
+        # Overlap if ranges intersect (with 5px tolerance)
+        if seg_y1 < c_y2 - 5 and seg_y2 > c_y1 + 5:
+            return True
+        # Early exit: chars are sorted by Y, if c starts after segment ends, stop
+        if c_y1 > seg_y2:
+            break
     return False
