@@ -130,6 +130,23 @@ export const reorderCharacters = (pageId: number) =>
     method: 'POST',
   });
 
+// Batch OCR
+export interface BatchOCRStatus {
+  total: number;
+  pending: number;
+  processing: number;
+  done: number;
+  failed: number;
+}
+
+export const triggerBatchOCR = (pageIds?: number[], engines: string[] = ['kraken'], maxPages = 50) =>
+  request<{ status: string; queued: number[]; count: number }>('/ocr/batch', {
+    method: 'POST',
+    body: JSON.stringify({ page_ids: pageIds ?? null, engines, max_pages: maxPages }),
+  });
+export const getBatchOCRStatus = () =>
+  request<BatchOCRStatus>('/ocr/batch/status');
+
 // Templates
 export interface TemplateMatch {
   text: string;
