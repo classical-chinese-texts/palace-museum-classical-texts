@@ -7,10 +7,11 @@ interface Props {
   onConfirm: (id: number) => Promise<void> | void;
   onCorrect: (id: number, text: string) => Promise<void> | void;
   onDelete: (id: number) => Promise<void> | void;
+  onInsertAfter?: (charId: number, columnIndex: number) => void;
   onClose: () => void;
 }
 
-export function CharEditor({ char, onConfirm, onCorrect, onDelete, onClose }: Props) {
+export function CharEditor({ char, onConfirm, onCorrect, onDelete, onInsertAfter, onClose }: Props) {
   const [inputText, setInputText] = useState('');
   const [candidates, setCandidates] = useState<CandidateResult | null>(null);
   const [loadingCandidates, setLoadingCandidates] = useState(false);
@@ -237,6 +238,15 @@ export function CharEditor({ char, onConfirm, onCorrect, onDelete, onClose }: Pr
         >
           跳過 (Space)
         </button>
+        {onInsertAfter && (
+          <button
+            onClick={() => onInsertAfter(char.id, char.column_index)}
+            className="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-sm"
+            title="在此字下方插入新字元"
+          >
+            +插入
+          </button>
+        )}
         <button
           onClick={() => onDelete(char.id)}
           className="px-3 py-2 bg-red-600 hover:bg-red-500 text-white rounded"

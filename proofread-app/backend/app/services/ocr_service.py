@@ -110,9 +110,22 @@ async def run_ocr_pipeline(page_id: int, engines: list[str], db: AsyncSession):
         )
         print(f"Template auto-identified {identified}/{len(gap_fill_chars)} gap-fill chars")
 
-    # Update page stats
-    total = len(merged)
-    low_conf = sum(1 for d in merged if d.confidence < CONFIDENCE_THRESHOLD)
+    # Auto-apply confusion matrix: flag known error-prone OCR results
+    await _apply_confusion_matrix(page_id, db)
+
+    # Proactive scan: for chars frequently missed by OCR, check if any
+    # unrecognized gap-fill bboxes match their templates
+    await _scan_for_frequently_missed(page_id, image_path, db)
+
+    # Update page stats (after confusion matrix may have changed confidence)
+    recount = await db.execute(
+        select(Character).where(
+            Character.page_id == page_id, Character.is_deleted == False
+        )
+    )
+    all_chars = recount.scalars().all()
+    total = len(all_chars)
+    low_conf = sum(1 for c in all_chars if c.ocr_confidence < CONFIDENCE_THRESHOLD)
 
     page.ocr_status = "done"
     page.ocr_engine = ",".join(engines)
@@ -555,3 +568,136 @@ def _filter_border_noise(
         for c in col0:
             c._deleted = True  # type: ignore[attr-defined]
         logger.info("Filtered %d border noise chars in leftmost column", len(col0))
+
+
+async def _apply_confusion_matrix(page_id: int, db: AsyncSession) -> int:
+    """Apply confusion matrix to newly OCR'd characters.
+
+    For each character whose ocr_text appears in the confusion matrix (≥2 corrections):
+    - Add likely corrections to alternatives
+    - Reduce ocr_confidence to flag for user review (yellow highlight)
+
+    Returns number of characters annotated.
+    """
+    from .confusion_service import get_confusion_dict
+
+    confusion = await get_confusion_dict(db, min_count=2)
+    if not confusion:
+        return 0
+
+    result = await db.execute(
+        select(Character).where(
+            Character.page_id == page_id,
+            Character.is_deleted == False,
+        )
+    )
+    chars = result.scalars().all()
+
+    annotated = 0
+    for c in chars:
+        if not c.ocr_text or c.ocr_text not in confusion:
+            continue
+
+        suggestions = confusion[c.ocr_text]
+        existing_alts = c.alternatives or []
+        existing_texts = {a["text"] for a in existing_alts if isinstance(a, dict)}
+
+        new_alts = list(existing_alts)
+        for s in suggestions:
+            if s["text"] not in existing_texts:
+                new_alts.append({
+                    "text": s["text"],
+                    "confidence": min(0.9, s["count"] * 0.1),
+                    "engine": "confusion_matrix",
+                })
+
+        if len(new_alts) > len(existing_alts):
+            c.alternatives = new_alts
+            # Dynamic penalty: more corrections → larger penalty (capped at 50%)
+            # 2 corrections → 6%, 5 → 15%, 10 → 30%, 17+ → 50%
+            total_corrections = sum(s["count"] for s in suggestions)
+            penalty = min(0.5, total_corrections * 0.03)
+            c.ocr_confidence = max(0.3, c.ocr_confidence * (1 - penalty))
+            annotated += 1
+
+    if annotated:
+        logger.info("Confusion matrix annotated %d chars on page %d", annotated, page_id)
+
+    return annotated
+
+
+async def _scan_for_frequently_missed(
+    page_id: int, image_path: str, db: AsyncSession,
+) -> int:
+    """For characters that OCR frequently misses, proactively template-match
+    against unrecognized (text=None or confidence<0.1) bboxes on this page.
+
+    This bridges the gap between "missed by grid detection" and "missed by OCR
+    recognition": if a bbox exists but wasn't recognized, and a template for a
+    frequently-missed character matches it, we fill it in preemptively.
+
+    Returns number of characters identified.
+    """
+    from .confusion_service import get_frequently_missed_chars
+    from .template_service import match_templates
+
+    missed = await get_frequently_missed_chars(db, min_count=2)
+    if not missed:
+        return 0
+
+    # Get the texts of frequently missed chars for filtering template results
+    missed_texts = {m["text"] for m in missed}
+
+    # Find unrecognized chars on this page
+    result = await db.execute(
+        select(Character).where(
+            Character.page_id == page_id,
+            Character.is_deleted == False,
+            Character.ocr_confidence < 0.1,
+        )
+    )
+    weak_chars = result.scalars().all()
+    if not weak_chars:
+        return 0
+
+    import cv2
+    img = cv2.imread(image_path)
+    if img is None:
+        return 0
+
+    h_img, w_img = img.shape[:2]
+    identified = 0
+
+    for c in weak_chars:
+        x1 = max(0, int(c.bbox_x))
+        y1 = max(0, int(c.bbox_y))
+        x2 = min(w_img, int(c.bbox_x + c.bbox_w))
+        y2 = min(h_img, int(c.bbox_y + c.bbox_h))
+        crop = img[y1:y2, x1:x2]
+
+        if crop.size == 0:
+            continue
+
+        try:
+            matches = await match_templates(crop, db, top_k=3)
+        except Exception:
+            continue
+
+        # Prefer matches for frequently-missed characters
+        for m in matches:
+            if m["text"] in missed_texts and m["similarity"] >= 0.4:
+                c.ocr_text = m["text"]
+                c.ocr_confidence = round(m["similarity"] * 0.7, 3)
+                c.ocr_engine = "missed_char_scan"
+                c.alternatives = [
+                    {"text": m["text"], "confidence": m["similarity"],
+                     "engine": "template_missed_scan"}
+                ]
+                identified += 1
+                break
+
+    if identified:
+        logger.info("Missed-char scan identified %d chars on page %d",
+                     identified, page_id)
+
+    return identified

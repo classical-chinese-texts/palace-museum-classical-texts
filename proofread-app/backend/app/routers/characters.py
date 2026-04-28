@@ -55,6 +55,13 @@ class CharacterUpdate(BaseModel):
     bbox_h: float | None = None
 
 
+class InsertRequest(BaseModel):
+    column_index: int
+    after_char_id: int | None = None
+    before_first: bool = False  # Insert before the first char in column
+    text: str | None = None
+
+
 class MergeRequest(BaseModel):
     character_ids: list[int]
     merged_text: str | None = None
@@ -121,6 +128,111 @@ async def create_character(page_id: int, body: CharacterCreate, db: AsyncSession
     )
 
 
+@router.post("/api/pages/{page_id}/characters/insert", response_model=CharacterOut, status_code=201)
+async def insert_character(page_id: int, body: InsertRequest, db: AsyncSession = Depends(get_db)):
+    """Smart insert: compute bbox from column neighbours, auto-reorder."""
+    page = await db.get(Page, page_id)
+    if not page:
+        raise HTTPException(404, "Page not found")
+
+    # Get all chars in the target column
+    result = await db.execute(
+        select(Character).where(
+            Character.page_id == page_id,
+            Character.column_index == body.column_index,
+            Character.is_deleted == False,
+        ).order_by(Character.char_index)
+    )
+    col_chars = list(result.scalars().all())
+
+    # Compute median dimensions from column neighbours
+    if col_chars:
+        heights = [c.bbox_h for c in col_chars]
+        widths = [c.bbox_w for c in col_chars]
+        xs = [c.bbox_x for c in col_chars]
+        median_h = sorted(heights)[len(heights) // 2]
+        median_w = sorted(widths)[len(widths) // 2]
+        median_x = sorted(xs)[len(xs) // 2]
+
+        # Compute median gap between consecutive chars
+        gaps = []
+        for i in range(1, len(col_chars)):
+            gap = col_chars[i].bbox_y - (col_chars[i - 1].bbox_y + col_chars[i - 1].bbox_h)
+            gaps.append(gap)
+        median_gap = sorted(gaps)[len(gaps) // 2] if gaps else 4.0
+    else:
+        median_h = 80.0
+        median_w = 80.0
+        median_x = 0.0
+        median_gap = 4.0
+
+    # Determine insertion position
+    if body.before_first and col_chars:
+        # Insert before the first char in column
+        first = col_chars[0]
+        new_y = first.bbox_y - median_gap - median_h
+        new_char_index = 0
+    elif body.after_char_id is not None:
+        anchor = next((c for c in col_chars if c.id == body.after_char_id), None)
+        if not anchor:
+            raise HTTPException(404, f"Character {body.after_char_id} not found in column {body.column_index}")
+        new_y = anchor.bbox_y + anchor.bbox_h + median_gap
+        new_char_index = anchor.char_index + 1
+    elif col_chars:
+        # Append at bottom
+        last = col_chars[-1]
+        new_y = last.bbox_y + last.bbox_h + median_gap
+        new_char_index = last.char_index + 1
+    else:
+        new_y = 10.0
+        new_char_index = 0
+
+    # Clamp bbox to image bounds
+    new_y = max(0.0, new_y)
+    if page.height:
+        new_y = min(new_y, max(0.0, page.height - median_h))
+    if page.width:
+        median_x = max(0.0, min(median_x, page.width - median_w))
+
+    # Shift char_index for chars at or after insertion point
+    for c in col_chars:
+        if c.char_index >= new_char_index:
+            c.char_index += 1
+
+    char = Character(
+        page_id=page_id,
+        bbox_x=median_x,
+        bbox_y=new_y,
+        bbox_w=median_w,
+        bbox_h=median_h,
+        column_index=body.column_index,
+        char_index=new_char_index,
+        ocr_text=body.text,
+        ocr_confidence=0.0,
+        ocr_engine="manual",
+    )
+    db.add(char)
+
+    log = CorrectionLog(character_id=0, old_text=None, new_text=body.text, action="add")
+    db.add(log)
+
+    await db.commit()
+    await db.refresh(char)
+    log.character_id = char.id
+    await db.commit()
+
+    await _update_page_stats(page_id, db)
+    return CharacterOut(
+        id=char.id, page_id=char.page_id,
+        bbox_x=char.bbox_x, bbox_y=char.bbox_y, bbox_w=char.bbox_w, bbox_h=char.bbox_h,
+        column_index=char.column_index, char_index=char.char_index,
+        ocr_text=char.ocr_text, ocr_confidence=char.ocr_confidence,
+        ocr_engine=char.ocr_engine, alternatives=char.alternatives,
+        is_confirmed=char.is_confirmed, corrected_text=char.corrected_text,
+        is_deleted=char.is_deleted, display_text=char.display_text,
+    )
+
+
 @router.patch("/api/characters/{char_id}", response_model=CharacterOut)
 async def update_character(char_id: int, body: CharacterUpdate, db: AsyncSession = Depends(get_db)):
     char = await db.get(Character, char_id)
@@ -160,8 +272,13 @@ async def update_character(char_id: int, body: CharacterUpdate, db: AsyncSession
 
     await _update_page_stats(char.page_id, db)
 
-    # Auto-save template when character is confirmed with text
-    if char.is_confirmed and char.display_text and char.display_text != "□":
+    # Auto-save template when character is confirmed with text.
+    # Skip manual inserts: their bbox is synthetic (median of neighbors),
+    # not detected from ink — cropping would produce garbage templates.
+    # Manual chars only get templates after bbox is user-adjusted (bbox fields in body).
+    bbox_was_adjusted = any([body.bbox_x, body.bbox_y, body.bbox_w, body.bbox_h])
+    skip_template = char.ocr_engine == "manual" and not bbox_was_adjusted
+    if char.is_confirmed and char.display_text and char.display_text != "□" and not skip_template:
         try:
             page = await db.get(Page, char.page_id)
             if page and page.image_path:
@@ -209,6 +326,38 @@ async def delete_character(char_id: int, db: AsyncSession = Depends(get_db)):
     db.add(log)
     await db.commit()
     await _update_page_stats(char.page_id, db)
+
+
+@router.post("/api/characters/{char_id}/restore", response_model=CharacterOut)
+async def restore_character(char_id: int, db: AsyncSession = Depends(get_db)):
+    """Restore a soft-deleted character (undo delete)."""
+    char = await db.get(Character, char_id)
+    if not char:
+        raise HTTPException(404, "Character not found")
+    if not char.is_deleted:
+        raise HTTPException(400, "Character is not deleted")
+
+    char.is_deleted = False
+    log = CorrectionLog(
+        character_id=char.id,
+        old_text=None,
+        new_text=char.display_text,
+        action="restore",
+    )
+    db.add(log)
+    await db.commit()
+    await db.refresh(char)
+    await _update_page_stats(char.page_id, db)
+
+    return CharacterOut(
+        id=char.id, page_id=char.page_id,
+        bbox_x=char.bbox_x, bbox_y=char.bbox_y, bbox_w=char.bbox_w, bbox_h=char.bbox_h,
+        column_index=char.column_index, char_index=char.char_index,
+        ocr_text=char.ocr_text, ocr_confidence=char.ocr_confidence,
+        ocr_engine=char.ocr_engine, alternatives=char.alternatives,
+        is_confirmed=char.is_confirmed, corrected_text=char.corrected_text,
+        is_deleted=char.is_deleted, display_text=char.display_text,
+    )
 
 
 @router.post("/api/characters/merge", response_model=CharacterOut)
@@ -419,6 +568,72 @@ async def reorder_characters(page_id: int, db: AsyncSession = Depends(get_db)):
 
     await db.commit()
     return {"reordered": len(chars)}
+
+
+@router.get("/api/corrections/confusion-matrix")
+async def get_confusion_matrix(db: AsyncSession = Depends(get_db)):
+    from ..services.confusion_service import build_confusion_matrix
+    return await build_confusion_matrix(db)
+
+
+@router.get("/api/corrections/missed-char-stats")
+async def get_missed_char_stats(db: AsyncSession = Depends(get_db)):
+    from ..services.confusion_service import get_missed_char_stats as _stats
+    return await _stats(db)
+
+
+@router.get("/api/corrections/frequently-missed")
+async def get_frequently_missed(db: AsyncSession = Depends(get_db)):
+    """Characters most often manually added — OCR systematically misses these."""
+    from ..services.confusion_service import get_frequently_missed_chars
+    return await get_frequently_missed_chars(db)
+
+
+@router.post("/api/pages/{page_id}/characters/re-evaluate")
+async def re_evaluate_characters(page_id: int, db: AsyncSession = Depends(get_db)):
+    """Re-evaluate unconfirmed characters using confusion matrix + template matching."""
+    page = await db.get(Page, page_id)
+    if not page:
+        raise HTTPException(404, "Page not found")
+
+    from ..services.confusion_service import get_confusion_dict
+
+    confusion = await get_confusion_dict(db, min_count=2)
+
+    result = await db.execute(
+        select(Character).where(
+            Character.page_id == page_id,
+            Character.is_deleted == False,
+            Character.is_confirmed == False,
+        )
+    )
+    chars = result.scalars().all()
+
+    updated = 0
+    for c in chars:
+        text = c.ocr_text
+        if not text or text not in confusion:
+            continue
+
+        suggestions = confusion[text]
+        # Add confusion-based suggestions to alternatives
+        existing_alts = c.alternatives or []
+        existing_texts = {a["text"] for a in existing_alts if isinstance(a, dict)}
+
+        new_alts = list(existing_alts)
+        for s in suggestions:
+            if s["text"] not in existing_texts:
+                new_alts.append({
+                    "text": s["text"],
+                    "confidence": min(0.9, s["count"] * 0.1),
+                    "engine": "confusion_matrix",
+                })
+        if len(new_alts) > len(existing_alts):
+            c.alternatives = new_alts
+            updated += 1
+
+    await db.commit()
+    return {"updated": updated}
 
 
 async def _update_page_stats(page_id: int, db: AsyncSession):

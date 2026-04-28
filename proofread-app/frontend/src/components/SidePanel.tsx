@@ -8,9 +8,10 @@ interface Props {
   selectedId: number | null;
   pageId: number | null;
   onSelect: (id: number | null) => void;
+  onInsert?: (columnIndex: number, afterCharId?: number, beforeFirst?: boolean) => void;
 }
 
-export function SidePanel({ characters, selectedId, pageId, onSelect }: Props) {
+export function SidePanel({ characters, selectedId, pageId, onSelect, onInsert }: Props) {
   const [mandokuPreview, setMandokuPreview] = useState('');
   const columns = useMemo(() => groupByColumn(characters), [characters]);
 
@@ -49,9 +50,20 @@ export function SidePanel({ characters, selectedId, pageId, onSelect }: Props) {
         <div className="text-xs text-gray-400 mb-2 font-medium">文字預覽 (直排)</div>
         <div className="flex gap-2 flex-row-reverse justify-end">
           {Array.from(columns.entries()).map(([colIdx, chars]) => (
-            <div key={colIdx} className="flex flex-col items-center">
+            <div key={colIdx} className="group/col flex flex-col items-center">
               <div className="text-[10px] text-gray-600 mb-1">欄{colIdx}</div>
-              {chars.map(c => {
+              {onInsert && (
+                <button
+                  onClick={() => onInsert(colIdx, undefined, true)}
+                  className="w-7 h-4 hidden group-hover/col:flex items-center justify-center
+                    text-[10px] text-gray-600 hover:text-white hover:bg-gray-600
+                    border border-dashed border-gray-700 hover:border-gray-400 rounded mb-0.5"
+                  title="在此欄頂部新增字元"
+                >
+                  +
+                </button>
+              )}
+              {chars.map((c, i) => {
                 let bg = '';
                 if (c.id === selectedId) bg = 'bg-blue-600';
                 else if (c.is_confirmed) bg = 'bg-green-900/50';
@@ -60,18 +72,42 @@ export function SidePanel({ characters, selectedId, pageId, onSelect }: Props) {
                 else if (c.ocr_confidence < 0.7) bg = 'bg-yellow-900/50';
 
                 return (
-                  <button
-                    key={c.id}
-                    onClick={() => onSelect(c.id)}
-                    className={`w-7 h-7 flex items-center justify-center text-sm text-white
-                      hover:bg-gray-600 border border-transparent hover:border-gray-500
-                      rounded ${bg}`}
-                    title={`${c.display_text} (${Math.round(c.ocr_confidence * 100)}%)`}
-                  >
-                    {c.display_text}
-                  </button>
+                  <div key={c.id} className="flex flex-col items-center">
+                    <button
+                      onClick={() => onSelect(c.id)}
+                      className={`w-7 h-7 flex items-center justify-center text-sm text-white
+                        hover:bg-gray-600 border border-transparent hover:border-gray-500
+                        rounded ${bg}`}
+                      title={`${c.display_text} (${Math.round(c.ocr_confidence * 100)}%)`}
+                    >
+                      {c.display_text}
+                    </button>
+                    {onInsert && i < chars.length - 1 && (
+                      <button
+                        onClick={() => onInsert(colIdx, c.id)}
+                        className="w-5 h-3 hidden group-hover/col:flex items-center justify-center
+                          text-[9px] text-gray-600 hover:text-white hover:bg-gray-600
+                          rounded opacity-0 group-hover/col:opacity-50 hover:!opacity-100
+                          transition-opacity"
+                        title={`在「${c.display_text}」之後插入`}
+                      >
+                        +
+                      </button>
+                    )}
+                  </div>
                 );
               })}
+              {onInsert && (
+                <button
+                  onClick={() => onInsert(colIdx, chars[chars.length - 1]?.id)}
+                  className="w-7 h-5 hidden group-hover/col:flex items-center justify-center
+                    text-[10px] text-gray-600 hover:text-white hover:bg-gray-600
+                    border border-dashed border-gray-700 hover:border-gray-400 rounded mt-0.5"
+                  title="在此欄底部新增字元"
+                >
+                  +
+                </button>
+              )}
             </div>
           ))}
         </div>

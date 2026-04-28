@@ -113,6 +113,8 @@ export const updateCharacter = (id: number, data: {
   });
 export const deleteCharacter = (id: number) =>
   request<void>(`/characters/${id}`, { method: 'DELETE' });
+export const restoreCharacter = (id: number) =>
+  request<Character>(`/characters/${id}/restore`, { method: 'POST' });
 export const mergeCharacters = (data: { character_ids: number[]; merged_text?: string }) =>
   request<Character>('/characters/merge', {
     method: 'POST', body: JSON.stringify(data),
@@ -121,6 +123,29 @@ export const splitCharacter = (id: number, split_position: number) =>
   request<Character[]>(`/characters/${id}/split`, {
     method: 'POST', body: JSON.stringify({ split_position }),
   });
+export const insertCharacter = (pageId: number, data: {
+  column_index: number; after_char_id?: number; before_first?: boolean; text?: string;
+}) =>
+  request<Character>(`/pages/${pageId}/characters/insert`, {
+    method: 'POST', body: JSON.stringify(data),
+  });
+export const reEvaluateCharacters = (pageId: number) =>
+  request<{ updated: number }>(`/pages/${pageId}/characters/re-evaluate`, {
+    method: 'POST',
+  });
+
+// Confusion matrix
+export interface ConfusionEntry {
+  ocr_text: string;
+  correct_text: string;
+  count: number;
+}
+
+export const getConfusionMatrix = () =>
+  request<ConfusionEntry[]>('/corrections/confusion-matrix');
+export const getMissedCharStats = () =>
+  request<{ position: string; count: number }[]>('/corrections/missed-char-stats');
+
 export const confirmAllAboveThreshold = (pageId: number) =>
   request<{ confirmed: number }>(`/pages/${pageId}/characters/confirm-all`, {
     method: 'POST',

@@ -154,9 +154,11 @@ def deskew_page(image_path: str, save_path: str | None = None) -> DeskewResult |
     corrected = cv2.warpPerspective(img, M, (out_w, out_h),
                                      borderMode=cv2.BORDER_REPLICATE)
 
-    # Crop out border lines (±18px padding)
+    # Crop out border lines (asymmetric padding)
+    # Bottom padding is smaller to avoid cutting off last 1-2 chars per column
     pad = 18
-    cropped = corrected[pad:out_h - pad, pad:out_w - pad]
+    pad_bottom = 8  # less aggressive bottom crop to preserve bottom chars
+    cropped = corrected[pad:out_h - pad_bottom, pad:out_w - pad]
 
     logger.info("Deskew: skew=%.3f°, corners TL=%s TR=%s BL=%s BR=%s, "
                 "output=%dx%d", skew, tl, tr, bl, br,
@@ -275,6 +277,11 @@ def _split_column_chars(
 
     ink_start = int(ink_rows[0])
     ink_end = int(ink_rows[-1])
+    # Extend ink_end by half a char pitch to avoid cutting the last char
+    strip_height = strip.shape[0]
+    est_pitch = col_width * 0.85
+    ink_end_extended = min(strip_height - 1, int(ink_end + est_pitch * 0.5))
+    ink_end = ink_end_extended
     total_h = ink_end - ink_start
 
     # Character pitch from column width
@@ -340,7 +347,15 @@ def _find_valleys_adaptive(proj: np.ndarray) -> list[int]:
         hi = min(len(smooth), i + window // 2)
         local_max[i] = np.max(smooth[lo:hi])
 
-    valley_mask = (smooth < local_max * 0.15) & (local_max > 5)
+    # Relaxed threshold at edges (first/last 15% of strip) to catch
+    # border chars whose inter-char gaps have less ink contrast
+    n = len(smooth)
+    edge_zone = int(n * 0.15)
+    threshold = np.full_like(smooth, 0.15)
+    threshold[:edge_zone] = 0.25
+    threshold[-edge_zone:] = 0.25
+
+    valley_mask = (smooth < local_max * threshold) & (local_max > 5)
     valley_rows = np.where(valley_mask)[0]
     vg = _group_consecutive(valley_rows, max_gap=5)
     return [(g[0] + g[-1]) // 2 for g in vg if len(g) >= 2]
