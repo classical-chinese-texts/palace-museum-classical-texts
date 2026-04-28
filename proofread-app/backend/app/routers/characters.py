@@ -441,6 +441,20 @@ async def split_character(char_id: int, body: SplitRequest, db: AsyncSession = D
     char.is_confirmed = False
     char.ocr_confidence = 0.0
 
+    # Shift subsequent chars in the same column to make room for char2
+    new_char_index = char.char_index + 1
+    subsequent = await db.execute(
+        select(Character).where(
+            Character.page_id == char.page_id,
+            Character.column_index == char.column_index,
+            Character.char_index >= new_char_index,
+            Character.is_deleted == False,
+            Character.id != char.id,
+        )
+    )
+    for sc in subsequent.scalars().all():
+        sc.char_index += 1
+
     # Create bottom half
     char2 = Character(
         page_id=char.page_id,
@@ -449,7 +463,7 @@ async def split_character(char_id: int, body: SplitRequest, db: AsyncSession = D
         bbox_w=char.bbox_w,
         bbox_h=h2,
         column_index=char.column_index,
-        char_index=char.char_index + 1,
+        char_index=new_char_index,
         ocr_text=old_text[1] if old_text and len(old_text) > 1 else None,
         ocr_confidence=0.0,
     )
